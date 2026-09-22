@@ -61,8 +61,16 @@ The dense band of leaderboard scores that commodity engineering reaches (~0.9459
 _Avoid_: the pack, baseline score
 
 **Rank-1 Gap**:
-The distance between the plateau and the top score, and the only part of the leaderboard that represents an open question.
+The distance between the Plateau and the top score. Once the only part of the leaderboard that looked like an open question; now ruled off the route, because no hypothesis with a mechanism survives and the Winner's Curse accounts for most of it.
 _Avoid_: the lead, the top score
+
+**Winner's Curse**:
+The upward bias of the best public-leaderboard score, arising because the maximum over many teams selects the team whose public split happened to flatter it. A property of the leaderboard's top row, not of the model sitting there.
+_Avoid_: public overfitting, LB probing, luck
+
+**Floor**:
+The submission protected regardless of how the remaining experiments go — the one that would be selected if every hypothesis died. Defined by simplicity and by a date it must exist by, never by being the best result.
+_Avoid_: fallback, safe submission, baseline submission
 
 **Recipe**:
 The publicly reverse-engineered generating rule behind the synthetic data — a linear `buy_score` with a threshold. A fact about the data's origin, not a usable model; it scores well under the Plateau.
