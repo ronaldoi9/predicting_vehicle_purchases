@@ -42,6 +42,10 @@ _Avoid_: results table, experiment log, tracking sheet
 Fitting a target encoding on an inner split of each training fold, never on the rows it is applied to. Required for every target encoding here; its absence inverts the measured gain.
 _Avoid_: out-of-fold encoding, cross-validated encoding
 
+**Health Gate**:
+The OOF AUC a turn's build must reproduce to prove the Canonical Fold Partition and the Baseline Frame were assembled correctly. Falling short is a bug report, not a verdict on the model — it is deliberately not an ambition about score.
+_Avoid_: target score, acceptance threshold, sanity check
+
 ### Competition landscape
 
 **Plateau**:
