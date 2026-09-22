@@ -35,8 +35,16 @@ The gap between a configuration's OOF AUC and its public leaderboard score. Its 
 _Avoid_: leaderboard correlation, CV/LB gap
 
 **Experiment Ledger**:
-The append-only record of every Comparison Run and every submission, versioned with the repo. The source of truth for what has been tried.
+The append-only record of every Comparison Run and every submission, versioned with the repo and written by exactly one code path. The source of truth for what has been tried.
 _Avoid_: results table, experiment log, tracking sheet
+
+**Experiment**:
+A named, declared configuration that states one hypothesis — one change against the Incumbent. It is a declaration, not an execution: the same Experiment yields several Run Records, which is what a Confirmation Run is made of.
+_Avoid_: run, trial, config
+
+**Run Record**:
+One execution of an Experiment as it appears in the Experiment Ledger: its configuration, per-fold scores, Paired Delta, the seeds and commit it ran under, and a pointer to the out-of-fold prediction vector it produced. The unit the next CRISP turn reads.
+_Avoid_: result, entry, log line
 
 **Nested Cross-Fit**:
 Fitting a target encoding on an inner split of each training fold, never on the rows it is applied to. Required for every target encoding here; its absence inverts the measured gain.
