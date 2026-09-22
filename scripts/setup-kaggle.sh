@@ -180,16 +180,36 @@ finish() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────
-# STAGES — Kaggle API credentials and a proven end-to-end submission.
+# STAGES — Kaggle authentication and a proven end-to-end submission.
 # ──────────────────────────────────────────────────────────────────────────
 
 TOTAL_STAGES=5
+
+# This wizard is a conversation: every prompt below waits on a human. Without a
+# terminal on stdin, `read` returns EOF instantly and the prompts spin. Refuse
+# up front rather than looping or silently writing blank credentials.
+if [[ ! -t 0 ]]; then
+  printf '\n  %s⚠ This wizard needs an interactive terminal.%s\n\n' "${YELLOW}" "${RESET}"
+  printf '  It is running without one, so every prompt would read end-of-file.\n'
+  printf '  Open a normal terminal in the project and run:\n\n'
+  printf '      ./scripts/setup-kaggle.sh\n\n'
+  printf '  (Running it through an agent'"'"'s shell or a pipe will not work:\n'
+  printf '   the Kaggle login needs your browser and your keyboard.)\n\n'
+  exit 1
+fi
 
 COMPETITION="playground-series-s6e9"
 KAGGLE_DIR="$HOME/.kaggle"
 KAGGLE_JSON="$KAGGLE_DIR/kaggle.json"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KAGGLE_BIN="kaggle"
+
+# authed — true when the CLI can actually reach the API as a logged-in user.
+# `competitions files` is the cheapest call that distinguishes "not authed"
+# from "authed but rules not accepted", which are different failures.
+authed() {
+  "$KAGGLE_BIN" competitions files -c "$COMPETITION" >/dev/null 2>&1
+}
 
 banner "Kaggle submission setup — $COMPETITION"
 
@@ -203,7 +223,6 @@ if command -v kaggle >/dev/null 2>&1; then
 else
   if ! command -v uv >/dev/null 2>&1; then
     warn "uv not found. Install it with: brew install uv"
-    SKIPPED+=("install uv, then re-run this wizard")
     exit 1
   fi
   say "Installing…"
@@ -211,93 +230,112 @@ else
 fi
 
 if ! command -v kaggle >/dev/null 2>&1; then
-  # uv installs tools into ~/.local/bin, which may not be on PATH yet.
   if [[ -x "$HOME/.local/bin/kaggle" ]]; then
     KAGGLE_BIN="$HOME/.local/bin/kaggle"
     warn "kaggle installed but ~/.local/bin is not on your PATH."
-    note "This wizard will use the full path. To fix it permanently, add to ~/.zshrc:"
-    note '  export PATH="$HOME/.local/bin:$PATH"'
+    note 'Fix permanently by adding to ~/.zshrc: export PATH="$HOME/.local/bin:$PATH"'
     SKIPPED+=('add export PATH="$HOME/.local/bin:$PATH" to ~/.zshrc')
   else
     warn "kaggle still not found after install — stopping."
     exit 1
   fi
 fi
-say "Using: $KAGGLE_BIN"
+say "Using: $KAGGLE_BIN ($("$KAGGLE_BIN" --version 2>&1 | head -1))"
 pause "Press Enter to continue"
 
-# ── Stage 2 — API credentials ─────────────────────────────────────────────
-stage "Generate your Kaggle API token"
+# ── Stage 2 — authenticate ────────────────────────────────────────────────
+stage "Authenticate with Kaggle"
 
-if [[ -f "$KAGGLE_JSON" ]]; then
-  say "Found existing credentials at $KAGGLE_JSON"
-  if ! confirm "Replace them with a fresh token?"; then
-    say "Keeping the existing token."
-    pause "Press Enter to continue"
-  else
-    rm -f "$KAGGLE_JSON"
-  fi
-fi
+if authed; then
+  say "Already authenticated — nothing to do."
+  pause "Press Enter to continue"
+else
+  say "The CLI supports a browser OAuth flow: no token file to download or move."
+  say "It opens Kaggle in your browser; you approve, and it caches the credentials."
+  printf '\n'
 
-if [[ ! -f "$KAGGLE_JSON" ]]; then
-  open_url "https://www.kaggle.com/settings"
-  step "Sign in if prompted."
-  step "Scroll to the 'API' section."
-  step "Click 'Create New Token' — your browser downloads kaggle.json."
-  note "If you already had a token, this revokes the old one."
-  pause "Press Enter once kaggle.json has downloaded"
-
-  mkdir -p "$KAGGLE_DIR"
-  FOUND=""
-  for candidate in "$HOME/Downloads/kaggle.json" "$HOME/Desktop/kaggle.json" "$REPO_ROOT/kaggle.json"; do
-    [[ -f "$candidate" ]] && { FOUND="$candidate"; break; }
-  done
-
-  if [[ -n "$FOUND" ]]; then
-    say "Found it at $FOUND"
-    mv "$FOUND" "$KAGGLE_JSON"
-  else
-    warn "Couldn't find kaggle.json automatically."
-    say "Open the downloaded file — it looks like {\"username\":\"...\",\"key\":\"...\"}"
-    ask KAGGLE_USERNAME "Paste the username value:"
-    ask_secret KAGGLE_KEY "Paste the key value (hidden):"
-    printf '{"username":"%s","key":"%s"}\n' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > "$KAGGLE_JSON"
+  AUTH_OK=0
+  if confirm "Run the browser login now? (recommended)"; then
+    if "$KAGGLE_BIN" auth login; then
+      AUTH_OK=1
+    else
+      warn "The login flow did not complete."
+    fi
   fi
 
-  chmod 600 "$KAGGLE_JSON"
-  printf '  %s✓%s credentials at %s (mode 600)\n' "$GREEN" "$RESET" "$KAGGLE_JSON"
+  # Fallback: the legacy API token, for when OAuth can't reach a browser.
+  if (( ! AUTH_OK )) && ! authed; then
+    printf '\n'
+    say "Falling back to the legacy API token."
+    open_url "https://www.kaggle.com/settings"
+    step "Scroll to the 'API' section and click 'Create New Token'."
+    step "Your browser downloads kaggle.json."
+    pause "Press Enter once it has downloaded"
+
+    mkdir -p "$KAGGLE_DIR"
+    FOUND=""
+    for candidate in "$HOME/Downloads/kaggle.json" "$HOME/Desktop/kaggle.json" "$REPO_ROOT/kaggle.json"; do
+      [[ -f "$candidate" ]] && { FOUND="$candidate"; break; }
+    done
+
+    if [[ -n "$FOUND" ]]; then
+      say "Found it at $FOUND"
+      mv "$FOUND" "$KAGGLE_JSON"
+    else
+      warn "Couldn't find kaggle.json automatically."
+      say "Open the downloaded file — it reads {\"username\":\"...\",\"key\":\"...\"}"
+      # Loop until both values are non-empty: silently writing blanks produces
+      # a credentials file that fails later with a confusing error.
+      ATTEMPTS=0
+      while :; do
+        ask KAGGLE_USERNAME "Paste the username value:"
+        ask_secret KAGGLE_KEY "Paste the key value (hidden):"
+        [[ -n "${KAGGLE_USERNAME// }" && -n "${KAGGLE_KEY// }" ]] && break
+        ATTEMPTS=$((ATTEMPTS + 1))
+        if (( ATTEMPTS >= 3 )); then
+          warn "Still empty after $ATTEMPTS attempts — giving up rather than looping."
+          note "Place the file yourself at $KAGGLE_JSON, chmod 600, then re-run."
+          exit 1
+        fi
+        warn "Both values are required — nothing was pasted. Try again."
+      done
+      printf '{"username":"%s","key":"%s"}\n' "$KAGGLE_USERNAME" "$KAGGLE_KEY" > "$KAGGLE_JSON"
+    fi
+    chmod 600 "$KAGGLE_JSON"
+    printf '  %s✓%s credentials at %s (mode 600)\n' "$GREEN" "$RESET" "$KAGGLE_JSON"
+  fi
+  pause "Press Enter to continue"
 fi
-pause "Press Enter to continue"
 
 # ── Stage 3 — accept the competition rules ────────────────────────────────
 stage "Accept the competition rules"
 say "The API rejects submissions until the rules are accepted in the browser."
-say "There is no way to do this from the command line."
-open_url "https://www.kaggle.com/competitions/$COMPETITION/rules"
-step "Read the rules, then click 'I Understand and Accept' at the bottom."
-note "Already accepted? The button is replaced by a confirmation — nothing to do."
-pause "Press Enter once the rules are accepted"
+say "There is no command-line equivalent."
 
-# ── Stage 4 — verify authentication ───────────────────────────────────────
-stage "Verify authentication and fetch the competition files"
-say "Listing the competition proves the token works and the rules are accepted."
-if "$KAGGLE_BIN" competitions list -s "playground-series-s6e9" 2>&1 | grep -q "$COMPETITION"; then
-  printf '  %s✓%s authenticated, competition visible\n' "$GREEN" "$RESET"
+if authed; then
+  say ""
+  printf '  %s✓%s Already accepted — the API is serving competition files.\n' "$GREEN" "$RESET"
 else
-  warn "Could not see the competition. Usual causes:"
-  note "  - the token is wrong or was revoked (re-run stage 2)"
-  note "  - the rules were not accepted (re-run stage 3)"
-  exit 1
+  open_url "https://www.kaggle.com/competitions/$COMPETITION/rules"
+  step "Read the rules, then click 'I Understand and Accept' at the bottom."
+  note "Already accepted? The button is replaced by a confirmation — nothing to do."
+  pause "Press Enter once the rules are accepted"
 fi
+pause "Press Enter to continue"
 
-say ""
-say "Data files are already in data/ — we only re-download if you want to verify."
-if confirm "Download the competition files to confirm access?"; then
-  TMPD=$(mktemp -d)
-  "$KAGGLE_BIN" competitions download -c "$COMPETITION" -p "$TMPD"
-  say "Downloaded to $TMPD:"
-  ls -lh "$TMPD"
-  note "Delete it when you're done: rm -rf $TMPD"
+# ── Stage 4 — verify ──────────────────────────────────────────────────────
+stage "Verify access"
+say "Listing the competition's files proves both the login and the rules."
+if OUT=$("$KAGGLE_BIN" competitions files -c "$COMPETITION" 2>&1); then
+  printf '  %s✓%s authenticated and entered\n\n' "$GREEN" "$RESET"
+  printf '%s\n' "$OUT" | head -10
+else
+  warn "Still no access. What the API said:"
+  printf '%s\n' "$OUT" | head -15
+  printf '\n'
+  note "If it mentions authentication, re-run and redo stage 2."
+  note "If it mentions rules or a 403, redo stage 3 — acceptance can take a moment."
+  exit 1
 fi
 pause "Press Enter to continue"
 
@@ -308,9 +346,9 @@ if [[ ! -f "$SAMPLE" ]]; then
   warn "Not found: $SAMPLE"
   SKIPPED+=("submit a calibration file once data/sample_submission.csv exists")
 else
-  say "This file predicts the constant 0.1746450 (the train positive rate) for every row."
-  say "Its AUC is 0.5 by construction — the point is to prove the pipe works,"
-  say "and it costs 1 of your 10 daily submissions."
+  say "This file predicts the constant 0.1746450 (the train positive rate) everywhere."
+  say "Its AUC is 0.5 by construction — the point is to prove the pipe works."
+  warn "It costs 1 of your 10 daily submissions."
   if confirm "Submit it now?"; then
     "$KAGGLE_BIN" competitions submit -c "$COMPETITION" \
       -f "$SAMPLE" -m "wizard calibration: constant baseline"
@@ -318,22 +356,23 @@ else
     say "Waiting for Kaggle to score it…"
     for _ in 1 2 3 4 5 6 7 8 9 10; do
       sleep 6
-      OUT=$("$KAGGLE_BIN" competitions submissions -c "$COMPETITION" --csv 2>/dev/null || true)
-      if printf '%s' "$OUT" | grep -qi "complete"; then break; fi
+      if "$KAGGLE_BIN" competitions submissions -c "$COMPETITION" --csv 2>/dev/null | grep -qi "complete"; then
+        break
+      fi
       printf '  %s.%s' "$DIM" "$RESET"
     done
     printf '\n\n'
     say "Your submissions so far:"
     "$KAGGLE_BIN" competitions submissions -c "$COMPETITION" | head -10
   else
-    say "Skipped — the credentials still work, you just haven't spent a slot."
+    say "Skipped — access still works, you just haven't spent a slot."
   fi
 fi
 
 printf '\n'
 say "From here, every submission is one command:"
 note "  $KAGGLE_BIN competitions submit -c $COMPETITION -f <file.csv> -m \"<message>\""
-say "Check your remaining daily quota (10/day, 2 final submissions count):"
+say "Check your remaining quota (10/day, 2 final submissions count):"
 note "  $KAGGLE_BIN competitions submissions -c $COMPETITION"
 pause "Press Enter to finish"
 
