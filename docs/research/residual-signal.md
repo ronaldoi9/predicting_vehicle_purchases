@@ -29,14 +29,16 @@ with the published buy rule `d + noise > 5.5`, and **the region** is
 2. **The recipe's own functional form is the largest single miss.** A GBDT given only the
    recipe's four columns scores **0.94038** against the closed-form recipe's **0.93769**
    (+0.00269) — more than twice what all nine non-recipe columns are worth put together.
-3. **Income count encoding is a real value-level artifact but dies under the recipe score.**
-   Conditional on `d`, its AUC is 0.4948.
+3. **Income count encoding is a real value-level artifact but nearly worthless.** Conditional on
+   `d` its AUC is 0.4948, and inside a strong model it is worth **+0.00030** alongside a commute
+   count — quote that number, not the standalone 0.461.
 4. **Both "floors" are isolated point masses with a hole beside them**, so a floor flag is
    information-free: a single split on the raw value already isolates them. `Age` is not
    clipped at all.
 5. **There is no income grid, and there is no univariate digit signal.** `income % 100` scores
    AUC 0.5414 over all rows and **0.50001** once the 30,000 mass is removed. The published
-   digit-decomposition gain is a resolution/binning effect, not a recoverable grid.
+   digit-decomposition gain is a resolution/binning effect, not a recoverable grid — it
+   replicates here at **+0.00175**, while floor flags are worth **−0.00002**.
 
 ---
 
@@ -342,9 +344,45 @@ beyond it.
 
 ---
 
-## 7. What this means for the project
+## 7. Ablation: reproducing the published path locally
 
-### 7.1 The achievable-ceiling question, answered
+Same 5-fold OOF frame, LightGBM `num_leaves=127`, `max_bin=511`, `lr=0.05`, 700 rounds, untuned,
+no early stopping. Levels sit ~0.002 under the published tuned plateau; read the deltas.
+
+| feature set | OOF AUC | in-region | outside-region | delta |
+|---|---|---|---|---|
+| raw 13 columns | 0.94167 | 0.82209 | 0.84233 | — |
+| + digit decomposition (`inc//1000`, `inc%1000`, `inc%100`) | **0.94342** | 0.82819 | 0.84751 | **+0.00175** |
+| + frequency encoding (income count, commute count) | **0.94372** | 0.82912 | 0.84824 | **+0.00030** |
+| + triple target encoding of income (`v`, `v//100`, `v//1000`) | 0.94185 | 0.82419 | 0.84809 | *−0.00187* |
+| + floor flags (income==30000, commute==5.0, age==25) | 0.94183 | 0.82409 | 0.84697 | **−0.00002** |
+| strong set minus the income count | 0.94348 | 0.82823 | 0.84872 | — |
+
+Three readings:
+
+- **Digit decomposition replicates**: +0.00175 here against the published +0.00143 / +0.0015. As
+  §6 argues, this is a resolution effect on the income axis, not a digit signal.
+- **Frequency encoding is worth +0.00030** on top of digits — the honest price of priority 2,
+  and the correct way to quote it (not the standalone 0.461).
+- **Floor flags are worth −0.00002.** Priority 3 is dead in the model as well as in the
+  conditional tests.
+
+**Caveat on the triple-TE row — it is a measurement failure, not a refutation of the published
++0.00129.** The encoding here is fitted on the training folds and applied to the *same* rows the
+model trains on, so the tree over-relies on it and OOF drops by 0.0019. This is exactly the
+failure mode Deotte flags in #3 (agents doing target encoding outside the k-fold). A correct
+implementation needs **nested** cross-fitting inside each training fold. Treat this row as a
+warning for the pipeline ticket, not as evidence against triple TE.
+
+Implied Bayes AUC on this frame: **0.94174** from the raw-13 model (realised 0.94167) and
+**0.94193** from the TE-bearing model (realised 0.94185) — re-ranking margins of 0.00007 and
+0.00008, consistent with §2.5.
+
+---
+
+## 8. What this means for the project
+
+### 8.1 The achievable-ceiling question, answered
 
 The ticket asked whether the residual positives are noise draws and what that implies for the
 ceiling. The precise answer:
@@ -364,7 +402,7 @@ measured here, and none of the four hypotheses in this ticket opens a route abov
 rank-1 gap of 0.0027 is not explained by any structure in the residual positives, by income
 counts, by floors, or by a value grid — which strengthens the public-probing explanation in #3.
 
-### 7.2 Concrete, cheap consequences for the pipeline
+### 8.2 Concrete, cheap consequences for the pipeline
 
 1. **Treat `Age` as a 45-level lookup**, not a smooth numeric: categorical, or a cross-fitted
    target encoding, or simply `max_bin >= 64` so every age gets its own bin. The residual is
@@ -373,15 +411,17 @@ counts, by floors, or by a value grid — which strengthens the public-probing e
 2. **Drop the "floor flag" items from the feature backlog.** `income == 30000` is
    `income < 38174` and `commute == 5.0` is `commute < 5.1`; the tree already has them, and
    conditional on the recipe score the commute flag is exactly chance (§5).
-3. **Do not expect income count encoding to earn its place next to income target encoding.** Keep
-   it if it is free (compute on train+test), but budget it at ~0 and measure it against the
-   TE-bearing model, not standalone (§4).
+3. **Budget income count encoding at +0.0003, not more** (§4, §7). Compute it on train+test, keep
+   it if free, and always measure it against a TE-bearing model rather than standalone.
+6. **Cross-fit target encodings *inside* each training fold.** A TE fitted on the training fold
+   and applied to those same rows cost **−0.0019 OOF** here (§7). This is the single most likely
+   way the pipeline ticket silently loses the published +0.00129.
 4. **Do not build grid / distance-from-grid features.** There is no grid (§6).
 5. **The recipe as `init_score` remains worth its published +0.00005–0.00007 at most.** Its
    closed form is 0.00269 *worse* than a GBDT on its own four inputs (§3.1), so it should be
    offered as a hint, never as a constraint, and never as a monotone prior.
 
-### 7.3 What this closes on the map
+### 8.3 What this closes on the map
 
 Four of the ticket's hypotheses resolve negative, with measurements. Combined with the four
 already killed in #2/#3, **every structural leak hypothesis raised so far on this competition is
@@ -390,7 +430,7 @@ the two final submissions", not as "find the differentiator".
 
 ---
 
-## 8. Method notes
+## 9. Method notes
 
 - All AUCs marked OOF are 5-fold `StratifiedKFold(shuffle=True, random_state=0)` on
   `Will_Buy_EV`, which #2 established is leak-free here (no duplicate feature vectors).
