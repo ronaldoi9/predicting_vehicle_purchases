@@ -146,6 +146,36 @@ def append_run_record(record: Mapping[str, Any], path: Path | None = None) -> No
         fh.write(json.dumps(record) + "\n")
 
 
+def load_records(path: Path | None = None) -> list[dict[str, Any]]:
+    """Read every Run Record from the ledger, in the order they were written.
+
+    Reading the runs ledger is allowed outside ``runner`` (``render`` does it);
+    keeping the parse here too means ``promote`` can look a run up without ever
+    naming the ledger file, so the single-writer discipline stays a grep.
+    """
+    path = Path(path) if path is not None else RUNS_LEDGER
+    if not path.exists():
+        return []
+    records: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            records.append(json.loads(line))
+    return records
+
+
+def find_run(run_id: str, path: Path | None = None) -> dict[str, Any] | None:
+    """Return the Run Record with this id, or ``None`` if there is no such run.
+
+    The last write wins, so a re-recorded id resolves to its latest record.
+    """
+    match: dict[str, Any] | None = None
+    for record in load_records(path):
+        if record.get("run_id") == run_id:
+            match = record
+    return match
+
+
 # --------------------------------------------------------------------------- #
 # The Comparison Run itself (needs the ML stack + the gitignored CSVs).
 # --------------------------------------------------------------------------- #
@@ -235,6 +265,48 @@ def _print_verdict(config, record: Mapping[str, Any]) -> None:
             "a bad model. First divergence hypothesis: bagging_freq. Per-fold: "
             + ", ".join(f"{a:.5f}" for a in record["fold_aucs"])
         )
+    print_promotion_verdict(record)
+
+
+def print_promotion_verdict(record: Mapping[str, Any]) -> str | None:
+    """Print the promotion verdict for a candidate run, then stop.
+
+    Returns the verdict kind (or ``None`` when the run carries no Paired Delta,
+    i.e. it is a baseline with no Incumbent to beat). This only *prints* — the
+    Incumbent is never advanced here; ``promote`` is the explicit command that
+    records a promotion. The rule itself lives in :mod:`verdict`.
+    """
+    import verdict as verdict_mod
+
+    mean_delta = record.get("paired_delta")
+    if mean_delta is None:
+        # No Incumbent to compare against (the first run, or a baseline);
+        # there is nothing to promote.
+        return None
+
+    folds_positive = record.get("folds_positive")
+    if folds_positive is None:
+        raise ValueError(
+            "a run with a Paired Delta must record folds_positive; "
+            f"run {record.get('run_id')!r} did not"
+        )
+
+    v = verdict_mod.classify(mean_delta, folds_positive)
+    banner = {
+        verdict_mod.ACCEPT: "VERDICT: ACCEPT",
+        verdict_mod.REJECT: "VERDICT: REJECT",
+        verdict_mod.NEEDS_CONFIRMATION: "VERDICT: NEEDS CONFIRMATION RUN",
+    }[v.kind]
+    print(
+        f"{banner} — paired delta {mean_delta:+.5f} vs incumbent "
+        f"{record.get('incumbent_run_id')!r}; {v.reason}"
+    )
+    if v.kind == verdict_mod.ACCEPT:
+        print(
+            "The Incumbent is NOT advanced automatically. To record the "
+            f"promotion, run: promote {record.get('run_id')}"
+        )
+    return v.kind
 
 
 def build_parser() -> argparse.ArgumentParser:
