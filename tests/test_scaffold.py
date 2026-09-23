@@ -29,7 +29,7 @@ BARE_MODULES = [
     "render",
 ]
 
-ENTRY_POINTS = ["run-experiment", "promote", "render-ledger", "record-score"]
+ENTRY_POINTS = ["run-experiment", "promote", "render-ledger", "submit", "record-score"]
 
 SRC = Path(__file__).resolve().parent.parent / "src"
 
