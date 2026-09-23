@@ -340,6 +340,7 @@ def submit(
     import time
 
     import numpy as np
+    import pandas as pd
 
     import adapter as adapter_mod
     import data
@@ -385,8 +386,6 @@ def submit(
     test_pred = mean_of_fold_predictions(fold_preds)
 
     # Write the submission CSV (id + probability) for the Kaggle CLI.
-    import pandas as pd
-
     out = pd.DataFrame({ID_COLUMN: test[ID_COLUMN].to_numpy(), TARGET_COLUMN: test_pred})
     csv_path = Path(tempfile.mkdtemp()) / f"submission-{run_id}.csv"
     out.to_csv(csv_path, index=False)
