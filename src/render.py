@@ -13,9 +13,10 @@ ledger, because it only reads it. ``runner`` remains the sole writer.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+import runner
 
 RUNS_LEDGER = Path(__file__).resolve().parent.parent / "ledger" / "runs.jsonl"
 
@@ -71,15 +72,10 @@ def render_table(records: Sequence[Mapping[str, Any]]) -> str:
 
 
 def load_records(path: Path | None = None) -> list[dict[str, Any]]:
-    path = Path(path) if path is not None else RUNS_LEDGER
-    if not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            records.append(json.loads(line))
-    return records
+    """Read the runs ledger. Reuses ``runner``'s single parser so the read side
+    stays one implementation (``render`` only reads; ``runner`` remains the sole
+    writer)."""
+    return runner.load_records(path)
 
 
 def build_parser() -> argparse.ArgumentParser:
