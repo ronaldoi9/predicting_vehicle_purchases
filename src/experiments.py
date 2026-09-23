@@ -95,7 +95,32 @@ TRACER_RAW13 = Experiment(
 )
 
 
-_REGISTRY: dict[str, Experiment] = {TRACER_RAW13.name: TRACER_RAW13}
+BASELINE = Experiment(
+    name="baseline",
+    hypothesis=(
+        "The complete Baseline Frame — the raw-13 columns plus income digit "
+        "decomposition (from the original integer) and train+test count encoding "
+        "of income and commute — reproduces the ablation's OOF 0.94372 and clears "
+        "the Health Gate at 0.9434, proving the partition and the Frame were "
+        "assembled correctly. Digit decomposition takes the raw-13 0.94167 to "
+        "0.94342 (+0.00175); count encoding adds +0.00030. This is the turn-1 "
+        "Incumbent every band (ii) candidate is a Paired Delta against."
+    ),
+    frame="baseline",
+    model="lightgbm",
+    params=LGBM_PARAMS,
+    num_boost_round=700,
+    fold_seed=0,
+    scale=False,
+    health_gate=0.9434,
+    target_oof=0.94372,
+)
+
+
+_REGISTRY: dict[str, Experiment] = {
+    TRACER_RAW13.name: TRACER_RAW13,
+    BASELINE.name: BASELINE,
+}
 
 
 def resolve(name: str) -> Experiment:

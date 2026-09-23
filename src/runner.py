@@ -176,7 +176,7 @@ def run(config) -> dict[str, Any]:
     fold = data.fold_ids_for(y, config.fold_seed)
     fold_sha = data.assert_fold_partition(fold, config.fold_seed)
 
-    X_train, _X_test = frame.build_frame(train, test)
+    X_train, _X_test = frame.build_frame(train, test, config.frame)
 
     oof = np.zeros(len(y), dtype=np.float64)
     fold_aucs: list[float] = []
