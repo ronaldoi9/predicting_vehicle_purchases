@@ -1,0 +1,65 @@
+[project]
+name = "predicting-vehicle-purchases"
+version = "0.1.0"
+description = "Kaggle Playground S6E9 — a reproducible turn-1 pipeline instrument."
+readme = "README.md"
+# Python 3.12 exactly. 3.14 (the interpreter previously on disk) and even 3.13
+# are excluded: dropping to 3.12 does not by itself avoid pandas 3.0 (measured
+# while resolving #8), so the interpreter is pinned and the pandas ceiling is
+# stated explicitly below rather than assumed from the interpreter.
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # pandas held below 3.0 so string columns keep the dtype behaviour the
+    # research code was written against. See src/columns.py for why selection
+    # is never done by dtype regardless.
+    "pandas>=2.2,<3",
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "lightgbm>=4.5",
+    "xgboost>=2.1",
+    "catboost>=1.2",
+    "imbalanced-learn>=0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+# The four module entry points. Registered here as stubs (#21); each resolves
+# and responds to --help. Their bodies are wired up in later tickets (#12).
+[project.scripts]
+run-experiment = "runner:main"       # run an Experiment as a Comparison Run
+promote = "promote:main"             # promote an Incumbent, recording the rule
+render-ledger = "render:main"        # render the ledger as a Markdown table
+record-score = "submission:record_score"  # fill in a submission's public score
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+# Flat import root: modules live directly under src/ with no nested package
+# directory, so they import by bare name (`import data`, `import frame`) once
+# installed editable.
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = [
+    "columns",
+    "data",
+    "frame",
+    "adapter",
+    "models",
+    "runner",
+    "submission",
+    "promote",
+    "render",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+# Managed interpreter, never the system Python. The env is rebuilt from this
+# lock with `uv sync`, never repaired in place.
+package = true

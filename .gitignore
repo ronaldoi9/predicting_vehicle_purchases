@@ -12,6 +12,9 @@ node_modules/
 .claude/worktrees/
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
 .ipynb_checkpoints/
 .pytest_cache/
 .vscode/
