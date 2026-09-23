@@ -459,9 +459,12 @@ def _print_verdict(config, record: Mapping[str, Any]) -> None:
 def _print_kill_criterion(record: Mapping[str, Any]) -> None:
     """Print the declared kill-criterion outcome, if the candidate had one.
 
-    Two shapes: the mean-delta threshold (income/Age TE) and the Resolution
-    sweep's folds-positive rule (a value must beat the Incumbent in at least
-    ``min_folds_positive`` of ``n_folds`` folds, else the axis freezes).
+    Four shapes, distinguished by the keys their outcome carries:
+    the seed bag's cost-versus-gain break-even (``required_gain``), conservative
+    tuning's time-boxed threshold (``time_budget_s``), the Resolution sweep's
+    folds-positive rule (``min_folds_positive`` — a value must beat the Incumbent
+    in at least that many of ``n_folds`` folds, else the axis freezes), and the
+    plain mean-delta threshold (income/Age TE).
     """
     kill = record.get("kill_criterion")
     if not kill:
