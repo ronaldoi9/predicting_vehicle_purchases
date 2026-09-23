@@ -30,11 +30,12 @@ dev = [
 # The four module entry points. Registered here as stubs (#21); each resolves
 # and responds to --help. Their bodies are wired up in later tickets (#12).
 [project.scripts]
-run-experiment = "runner:main"       # run an Experiment as a Comparison Run
+run-experiment = "runner:main"       # run an Experiment as a Comparison Run (--confirm: seeds 0/1/2)
 promote = "promote:main"             # promote an Incumbent, recording the rule
 render-ledger = "render:main"        # render the ledger as a Markdown table
 submit = "submission:main"           # fit the mean of the five folds and submit
 record-score = "submission:record_score"  # fill in a submission's public score
+select-finals = "finals:main"        # select the two finals (best CV + Floor) and close the turn
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -57,6 +58,7 @@ py-modules = [
     "submission",
     "promote",
     "render",
+    "finals",
 ]
 
 [tool.pytest.ini_options]

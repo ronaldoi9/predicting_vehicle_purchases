@@ -84,6 +84,35 @@ def paired_delta_summary(deltas: Sequence[float]) -> tuple[float, int]:
     return mean, folds_positive
 
 
+def confirmation_summary(per_seed_oof_auc: Mapping[int, float]) -> dict[str, Any]:
+    """Summarise a Confirmation Run of the standing Incumbent across seeds 0/1/2.
+
+    Band (iii) freezes: nothing new enters, so this is the freeze-time
+    Confirmation Run of the *standing Incumbent itself* — one config re-run on
+    each of the three canonical fold seeds — read for how stable its OOF AUC is.
+    Unlike a candidate's Confirmation Run there is no Incumbent to pair against
+    (:func:`verdict.sign_holds` handles that case), so the summary is the
+    per-seed OOF AUCs, their mean, and their spread (max - min). Pure, so it is
+    tested without the ML stack; :func:`confirm` produces the inputs live.
+    """
+    import verdict
+
+    expected = tuple(verdict.CONFIRMATION_SEEDS)
+    seeds = tuple(sorted(int(s) for s in per_seed_oof_auc))
+    if seeds != expected:
+        raise ValueError(
+            f"a Confirmation Run has exactly fold seeds {expected}; got {seeds}"
+        )
+    aucs = [float(per_seed_oof_auc[s]) for s in seeds]
+    mean = sum(aucs) / len(aucs)
+    return {
+        "seeds": list(seeds),
+        "oof_aucs": aucs,
+        "mean_oof_auc": mean,
+        "oof_spread": max(aucs) - min(aucs),
+    }
+
+
 def kill_criterion_outcome(mean_delta: float, kill_delta: float) -> dict[str, Any]:
     """Apply a candidate's declared kill criterion to its mean Paired Delta.
 
@@ -436,6 +465,40 @@ def run(config) -> dict[str, Any]:
     return record
 
 
+def confirm(config) -> dict[str, Any]:
+    """Run a Confirmation Run of one config across fold seeds 0/1/2 and record it.
+
+    Band (iii)'s freeze move: re-run the standing Incumbent (``config``) on each
+    of :data:`verdict.CONFIRMATION_SEEDS`, appending a Run Record per seed via the
+    single :func:`run` path (so each seed's ledger write, fold assert and git
+    capture happen in one place), then read the spread with
+    :func:`confirmation_summary`. Deliberately not a config hash for identity —
+    one config runs three times and :func:`run_id` is timestamp-based so the
+    repetitions do not collide.
+
+    Heavy: it calls :func:`run` three times, so it only executes where the ML
+    stack and the gitignored CSVs are present. The summary maths is pure and
+    tested separately.
+    """
+    import verdict
+    from dataclasses import replace
+
+    per_seed: dict[int, float] = {}
+    for seed in verdict.CONFIRMATION_SEEDS:
+        record = run(replace(config, fold_seed=seed))
+        per_seed[seed] = record["oof_auc"]
+    summary = confirmation_summary(per_seed)
+    print(
+        f"Confirmation Run of {config.name!r} across fold seeds "
+        f"{'/'.join(map(str, summary['seeds']))}: mean OOF "
+        f"{summary['mean_oof_auc']:.5f}, spread {summary['oof_spread']:.5f} "
+        "(per-seed: "
+        + ", ".join(f"{s}:{a:.5f}" for s, a in zip(summary["seeds"], summary["oof_aucs"]))
+        + ")."
+    )
+    return summary
+
+
 def _print_verdict(config, record: Mapping[str, Any]) -> None:
     oof_auc = record["oof_auc"]
     gate = config.health_gate
@@ -588,6 +651,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the band (ii) experiment queue in its declared run order and exit",
     )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="run a Confirmation Run of the experiment across fold seeds 0/1/2 (freeze)",
+    )
     return parser
 
 
@@ -619,7 +687,10 @@ def main(argv: list[str] | None = None) -> int:
     import experiments
 
     config = experiments.resolve(args.experiment)
-    run(config)
+    if args.confirm:
+        confirm(config)
+    else:
+        run(config)
     return 0
 
 
