@@ -386,6 +386,43 @@ CONSERVATIVE_TUNING = replace(
 )
 
 
+# --------------------------------------------------------------------------- #
+# The band (ii) experiment queue, in its declared order (#12, PRD #12).
+# --------------------------------------------------------------------------- #
+# Story 62: the queue is run in its declared order, so the candidate with a
+# published gain is measured before the ones that merely sound promising. Each
+# closed child ticket added its own candidates; the *order* lived only as prose
+# in the spec table, so this is the single ordered source of truth turn 2 (and a
+# queue runner) reads instead of reconstructing.
+#
+#   1. income_te                              — the largest published gain, first
+#   2. the Resolution sweep (ascending max_bin)
+#   3. age_te
+#   4. seed_bag
+#   5. conservative_tuning
+#
+# ``smotenc`` is deliberately absent: it is a *separately scheduled* candidate
+# that "keeps its own slot" (see SEPARATELY_SCHEDULED). The multi-family blend
+# (candidate 6) is gated behind the queue exhausting early and is not built at
+# all, so it appears in neither structure and does not resolve.
+BAND_II_QUEUE: tuple[Experiment, ...] = (
+    INCOME_TE,
+    *MAX_BIN_EXPERIMENTS,
+    AGE_TE,
+    SEED_BAG_EXPERIMENT,
+    CONSERVATIVE_TUNING,
+)
+
+# Candidates that carry their own submission slot rather than the main queue's
+# ordered track — SMOTENC keeps its own slot per the spec.
+SEPARATELY_SCHEDULED: tuple[Experiment, ...] = (SMOTENC,)
+
+
+def queue_names() -> tuple[str, ...]:
+    """The band (ii) queue's Experiment names in declared run order."""
+    return tuple(exp.name for exp in BAND_II_QUEUE)
+
+
 _REGISTRY: dict[str, Experiment] = {
     TRACER_RAW13.name: TRACER_RAW13,
     BASELINE.name: BASELINE,

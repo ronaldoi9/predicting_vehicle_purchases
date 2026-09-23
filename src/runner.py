@@ -583,11 +583,36 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         help="name of the Experiment to resolve and run",
     )
+    parser.add_argument(
+        "--queue",
+        action="store_true",
+        help="print the band (ii) experiment queue in its declared run order and exit",
+    )
     return parser
+
+
+def _print_queue() -> None:
+    """Print the band (ii) queue in declared order, so the next run is one read.
+
+    Story 62: the queue is run in its declared order. This surfaces that order —
+    the single source of truth in :mod:`experiments` — rather than leaving it to
+    be reconstructed from the spec.
+    """
+    import experiments
+
+    print("Band (ii) experiment queue, in declared run order:")
+    for i, name in enumerate(experiments.queue_names(), start=1):
+        print(f"  {i}. {name}")
+    separate = ", ".join(exp.name for exp in experiments.SEPARATELY_SCHEDULED)
+    if separate:
+        print(f"Separately scheduled (own slot): {separate}")
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.queue:
+        _print_queue()
+        return 0
     if not args.experiment:
         build_parser().error("an experiment name is required")
 
