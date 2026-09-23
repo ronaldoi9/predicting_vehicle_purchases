@@ -60,6 +60,17 @@ COUNT_ENCODED_COLUMNS = ("Annual_Income_USD", "Daily_Commute_km")
 AGE_COLUMN = "Age"
 AGE_DISTINCT_VALUES = 45
 
+# The frame specs this builder knows: the tracer's narrow path and the complete
+# Baseline Frame. One source of truth for both the validity check and its error.
+FRAME_SPECS = ("raw13", "baseline")
+
+
+def _require_known_spec(spec: str) -> None:
+    """Reject a frame spec this builder does not know, naming the ones it does."""
+    if spec not in FRAME_SPECS:
+        known = ", ".join(repr(s) for s in FRAME_SPECS)
+        raise ValueError(f"unknown frame spec {spec!r}; known: {known}")
+
 
 def extra_columns(spec: str) -> list[str]:
     """The Frame columns a spec adds on top of the raw-13 layout.
@@ -68,13 +79,12 @@ def extra_columns(spec: str) -> list[str]:
     checkable without the ML stack. ``raw13`` adds nothing; ``baseline`` adds
     the three income digits and the two count encodings.
     """
+    _require_known_spec(spec)
     if spec == "raw13":
         return []
-    if spec == "baseline":
-        return [name for name, _ in INCOME_DIGIT_TRANSFORMS] + [
-            f"{col}_count" for col in COUNT_ENCODED_COLUMNS
-        ]
-    raise ValueError(f"unknown frame spec {spec!r}; known: 'raw13', 'baseline'")
+    return [name for name, _ in INCOME_DIGIT_TRANSFORMS] + [
+        f"{col}_count" for col in COUNT_ENCODED_COLUMNS
+    ]
 
 
 def _count_lookup(values):
@@ -133,8 +143,7 @@ def build_frame(train, test, spec: str = "baseline"):
     """
     import pandas as pd
 
-    if spec not in ("raw13", "baseline"):
-        raise ValueError(f"unknown frame spec {spec!r}; known: 'raw13', 'baseline'")
+    _require_known_spec(spec)
 
     n_train = len(train)
 
