@@ -26,6 +26,11 @@ from columns import (
 ORDINAL_LEVELS = {"Low": 0, "Medium": 1, "High": 2}
 
 
+def _drop_id_and_target(df):
+    """Drop ``id`` and the target from a frame if present (test has no target)."""
+    return df.drop(columns=[c for c in (ID_COLUMN, TARGET_COLUMN) if c in df.columns])
+
+
 def _encode_ordinals(df):
     out = {}
     for col in ORDINAL_COLUMNS:
@@ -48,12 +53,10 @@ def build_frame(train, test):
     import pandas as pd
 
     n_train = len(train)
-    drop = [c for c in (ID_COLUMN, TARGET_COLUMN) if c in train.columns or c in test.columns]
 
     # One-hot the nominals over the combined frame so the vocabulary is shared.
     combined = pd.concat(
-        [train.drop(columns=[c for c in drop if c in train.columns]),
-         test.drop(columns=[c for c in drop if c in test.columns])],
+        [_drop_id_and_target(train), _drop_id_and_target(test)],
         axis=0,
         ignore_index=True,
     )
