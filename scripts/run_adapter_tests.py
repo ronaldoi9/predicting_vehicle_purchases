@@ -10,7 +10,6 @@ it runs for real under pytest on a provisioned machine.
 
 from __future__ import annotations
 
-import importlib
 import traceback
 
 import test_adapter as mod
@@ -38,5 +37,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    importlib.import_module("test_adapter")
     raise SystemExit(main())

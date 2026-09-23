@@ -66,6 +66,20 @@ def _smoothed_mean(count: float, total: float, prior: float, weight: float = PRI
     return (total + weight * prior) / (count + weight)
 
 
+def _key_stats(keys, y) -> tuple[dict, dict]:
+    """Per-key row count and target sum over the given rows.
+
+    The shared accumulation behind both the full-training encoding and each
+    inner cross-fit fold: ``keys`` and ``y`` are numpy arrays aligned row for row.
+    """
+    counts: dict = {}
+    totals: dict = {}
+    for k, t in zip(keys.tolist(), y.tolist()):
+        counts[k] = counts.get(k, 0) + 1
+        totals[k] = totals.get(k, 0.0) + t
+    return counts, totals
+
+
 def _assert_no_validation_rows(train_index, validation_index) -> None:
     """Refuse a ``fit`` that received any row of the outer validation fold.
 
@@ -190,11 +204,7 @@ class Adapter:
     def _full_encoding(self, keys, y):
         """The smoothed per-key encoding over all fitting rows, plus the prior."""
         prior = float(y.mean())
-        counts: dict = {}
-        totals: dict = {}
-        for k, t in zip(keys.tolist(), y.tolist()):
-            counts[k] = counts.get(k, 0) + 1
-            totals[k] = totals.get(k, 0.0) + t
+        counts, totals = _key_stats(keys, y)
         mapping = {
             k: _smoothed_mean(counts[k], totals[k], prior, self.prior_weight)
             for k in counts
@@ -220,11 +230,7 @@ class Adapter:
         )
         for in_tr, in_va in inner.split(np.zeros(len(keys)), y):
             prior = float(y[in_tr].mean())
-            counts: dict = {}
-            totals: dict = {}
-            for k, t in zip(keys[in_tr].tolist(), y[in_tr].tolist()):
-                counts[k] = counts.get(k, 0) + 1
-                totals[k] = totals.get(k, 0.0) + t
+            counts, totals = _key_stats(keys[in_tr], y[in_tr])
             for pos in in_va:
                 k = keys[pos]
                 if k in counts:
