@@ -328,6 +328,67 @@ def _latest_run_for(experiment: str, fold_seed: int, path: Path | None = None) -
 # --------------------------------------------------------------------------- #
 # The Comparison Run itself (needs the ML stack + the gitignored CSVs).
 # --------------------------------------------------------------------------- #
+def fold_adapter(config, outer_fold: int, validation_index):
+    """The Model Adapter for one outer fold, configured from ``config``.
+
+    Shared by the Comparison Run and the Submission Fit so the two cannot
+    drift. They did drift: the Submission Fit built ``Adapter(scale=...)``
+    alone, silently dropping the target encoding, the oversampler and the
+    validation index — so a promoted candidate would have submitted
+    predictions from a different model than the one that was scored. For the
+    Incumbent, whose ``target_encode`` is empty, that difference was invisible.
+    """
+    import adapter as adapter_mod
+    import frame
+
+    oversample = getattr(config, "oversample", None)
+    return adapter_mod.Adapter(
+        scale=config.scale,
+        target_encode=getattr(config, "target_encode", ()),
+        outer_fold=outer_fold,
+        validation_index=set(validation_index),
+        scale_columns=(frame.INCOME_COLUMN,) if config.scale else (),
+        scale_exclude=tuple(name for name, _ in frame.INCOME_DIGIT_TRANSFORMS),
+        oversample=oversample,
+        oversample_continuous_columns=(
+            (frame.INCOME_COLUMN,) + tuple(n for n, _ in frame.INCOME_DIGIT_TRANSFORMS)
+            if oversample else ()
+        ),
+        income_column=frame.INCOME_COLUMN if oversample else None,
+        income_digit_transforms=frame.INCOME_DIGIT_TRANSFORMS if oversample else (),
+    )
+
+
+def fold_predict(config, X_tr, y_fit, X_out):
+    """Fit this fold's model(s) on ``X_tr`` and predict ``X_out``.
+
+    Honours a seed bag by averaging one member per seed. Shared with the
+    Submission Fit for the same reason as :func:`fold_adapter`.
+    """
+    import numpy as np
+
+    import experiments as experiments_mod
+    import models
+
+    seed_bag = getattr(config, "seed_bag", ()) or ()
+    if seed_bag:
+        member_preds = [
+            models.predict(
+                models.fit(
+                    X_tr,
+                    y_fit,
+                    experiments_mod.seeded_params(config.params, s),
+                    num_boost_round=config.num_boost_round,
+                ),
+                X_out,
+            )
+            for s in seed_bag
+        ]
+        return np.mean(np.asarray(member_preds), axis=0)
+    model = models.fit(X_tr, y_fit, config.params, num_boost_round=config.num_boost_round)
+    return models.predict(model, X_out)
+
+
 def run(config) -> dict[str, Any]:
     """Execute one Comparison Run end to end and record it.
 
@@ -369,37 +430,14 @@ def run(config) -> dict[str, Any]:
         tr_idx = np.where(fold != k)[0]
         va_idx = np.where(fold == k)[0]
 
-        adapter = adapter_mod.Adapter(
-            scale=config.scale,
-            target_encode=getattr(config, "target_encode", ()),
-            outer_fold=k,
-            validation_index=set(va_idx.tolist()),
-            scale_columns=(frame.INCOME_COLUMN,) if config.scale else (),
-            scale_exclude=tuple(name for name, _ in frame.INCOME_DIGIT_TRANSFORMS),
-            oversample=oversample,
-            oversample_continuous_columns=(
-                (frame.INCOME_COLUMN,) + tuple(n for n, _ in frame.INCOME_DIGIT_TRANSFORMS)
-                if oversample else ()
-            ),
-            income_column=frame.INCOME_COLUMN if oversample else None,
-            income_digit_transforms=frame.INCOME_DIGIT_TRANSFORMS if oversample else (),
-        )
+        adapter = fold_adapter(config, k, va_idx.tolist())
         X_tr = adapter.fit_transform(X_train.iloc[tr_idx], y[tr_idx])
         X_va = adapter.transform(X_train.iloc[va_idx])
         # Oversampling synthesises training rows, so the model is fitted on the
         # resampled targets, not the original fold slice.
         y_fit = adapter.resampled_y if adapter.resampled_y is not None else y[tr_idx]
 
-        if seed_bag:
-            member_preds = []
-            for s in seed_bag:
-                params = experiments_mod.seeded_params(config.params, s)
-                m = models.fit(X_tr, y_fit, params, num_boost_round=config.num_boost_round)
-                member_preds.append(models.predict(m, X_va))
-            preds = np.mean(np.asarray(member_preds), axis=0)
-        else:
-            model = models.fit(X_tr, y_fit, config.params, num_boost_round=config.num_boost_round)
-            preds = models.predict(model, X_va)
+        preds = fold_predict(config, X_tr, y_fit, X_va)
         oof[va_idx] = preds
         fold_aucs.append(float(roc_auc_score(y[va_idx], preds)))
 

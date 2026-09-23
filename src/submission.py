@@ -376,13 +376,14 @@ def submit(
     fold_preds: list[Any] = []
     for k in range(data.N_FOLDS):
         tr_idx = np.where(fold != k)[0]
-        adapter = adapter_mod.Adapter(scale=config.scale)
+        va_idx = np.where(fold == k)[0]
+        # Built through the runner's shared helpers, so the Submission Fit
+        # applies exactly the transforms the Comparison Run measured.
+        adapter = runner.fold_adapter(config, k, va_idx.tolist())
         X_tr = adapter.fit_transform(X_train.iloc[tr_idx], y[tr_idx])
         X_te = adapter.transform(X_test)
-        model = models.fit(
-            X_tr, y[tr_idx], config.params, num_boost_round=config.num_boost_round
-        )
-        fold_preds.append(models.predict(model, X_te))
+        y_fit = adapter.resampled_y if adapter.resampled_y is not None else y[tr_idx]
+        fold_preds.append(runner.fold_predict(config, X_tr, y_fit, X_te))
     test_pred = mean_of_fold_predictions(fold_preds)
 
     # Write the submission CSV (id + probability) for the Kaggle CLI.
