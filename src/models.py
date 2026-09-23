@@ -18,6 +18,22 @@ from typing import Any, Mapping
 # individually addressable (45 < 64, with headroom).
 MIN_MAX_BIN = 64
 
+# The tree families: a GBDT chooses splits by gain and is invariant to any
+# monotone transform, so scaling is a no-op and stays off (ADR-0001). Any family
+# not listed here is scale-sensitive (linear, SVM, neural net) and the Adapter's
+# scaling hook turns on for it. Turn 1 is LightGBM alone, so scaling never runs.
+TREE_FAMILIES = frozenset({"lightgbm", "xgboost", "catboost"})
+
+
+def needs_scaling(family: str) -> bool:
+    """Whether the Adapter's scaling hook applies to this model family.
+
+    ``False`` for a tree family (a no-op there), ``True`` for a scale-sensitive
+    one — the family-conditional switch that keeps scaling out of turn 1 while
+    leaving it wired for a linear family that arrives later.
+    """
+    return family not in TREE_FAMILIES
+
 
 def fit(X, y, params: Mapping[str, Any], num_boost_round: int = 700):
     """Fit one model family on ``X``/``y`` under ``params`` for fixed rounds.

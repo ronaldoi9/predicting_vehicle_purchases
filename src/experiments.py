@@ -14,7 +14,7 @@ and add queue candidates as single-field replacements of this one.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
 # Turn 1's LightGBM parameters, taken verbatim from the leak hunt's ablation so
@@ -57,6 +57,15 @@ class Experiment:
     num_boost_round: int
     fold_seed: int = 0
     scale: bool = False
+    # Columns the Model Adapter nested-cross-fit target-encodes inside each
+    # training fold. Empty for the Incumbent; a candidate adds exactly this one
+    # field, so the one-change discipline is visible in the declaration itself.
+    target_encode: tuple[str, ...] = ()
+    # The Incumbent this candidate is a Paired Delta against, and the kill
+    # criterion declared *before* it runs (a mean paired delta below this on the
+    # canonical seed kills the candidate). Both ``None`` for the Incumbent runs.
+    incumbent: str | None = None
+    kill_delta: float | None = None
     health_gate: float = 0.9434
     target_oof: float = 0.94167
 
@@ -64,7 +73,12 @@ class Experiment:
         return {k: self.params[k] for k in SEED_KEYS if k in self.params}
 
     def as_config(self) -> dict[str, Any]:
-        """The JSON-serialisable config that lands in the ledger."""
+        """The JSON-serialisable config that lands in the ledger.
+
+        Carries the modelling fields (a change to any of them is a change to the
+        config hash); the Incumbent pointer and kill criterion are recorded on
+        the Run Record, not here, so they do not perturb "have I tried this?".
+        """
         return {
             "name": self.name,
             "frame": self.frame,
@@ -72,6 +86,7 @@ class Experiment:
             "num_boost_round": self.num_boost_round,
             "fold_seed": self.fold_seed,
             "scale": self.scale,
+            "target_encode": list(self.target_encode),
             "params": dict(self.params),
         }
 
@@ -117,9 +132,38 @@ BASELINE = Experiment(
 )
 
 
+# The band (ii) queue's first and highest-value candidate: nested cross-fit
+# target encoding of the exact income value. Expressed as a single-field change
+# against the Incumbent (``target_encode``) via ``replace``, so the one-change
+# discipline is literal — every modelling field but that one is the Incumbent's.
+INCOME_TE = replace(
+    BASELINE,
+    name="income_te",
+    hypothesis=(
+        "Adding the Model Adapter's nested cross-fit target encoding of the "
+        "exact income value to the Baseline Frame beats the Incumbent. The leak "
+        "hunt published this feature at +0.00129 standalone and measured it at "
+        "-0.00187 when mis-fitted on its own rows — the most expensive mistake "
+        "in the project. On top of the Frame the delta is expected to be smaller "
+        "than +0.00129, because the target encoding and income digit "
+        "decomposition both buy Resolution and overlap partially. Single-field "
+        "change against the Incumbent: target_encode = (Annual_Income_USD,). "
+        "Kill criterion, declared before running: paired delta < +0.0005 on one "
+        "seed -> the candidate is dead."
+    ),
+    target_encode=("Annual_Income_USD",),
+    incumbent="baseline",
+    kill_delta=0.0005,
+    # The gate/target the Incumbent already cleared; the candidate is judged on
+    # its Paired Delta and kill criterion, not on clearing a new gate.
+    target_oof=0.94372,
+)
+
+
 _REGISTRY: dict[str, Experiment] = {
     TRACER_RAW13.name: TRACER_RAW13,
     BASELINE.name: BASELINE,
+    INCOME_TE.name: INCOME_TE,
 }
 
 

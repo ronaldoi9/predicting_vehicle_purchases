@@ -62,6 +62,38 @@ def run_id(experiment_name: str, when: datetime | None = None) -> str:
     return f"{stamp}-{experiment_name}"
 
 
+def fold_deltas(candidate_fold_aucs: Sequence[float], incumbent_fold_aucs: Sequence[float]) -> list[float]:
+    """Per-fold Paired Delta: candidate minus Incumbent, fold by fold.
+
+    The two runs must share the Canonical Fold Partition (same ``fold_seed``), so
+    each fold's AUCs are paired and the difference is a like-for-like delta.
+    """
+    if len(candidate_fold_aucs) != len(incumbent_fold_aucs):
+        raise ValueError(
+            "candidate and incumbent must have the same fold count to pair: "
+            f"{len(candidate_fold_aucs)} vs {len(incumbent_fold_aucs)}"
+        )
+    return [float(c) - float(i) for c, i in zip(candidate_fold_aucs, incumbent_fold_aucs)]
+
+
+def paired_delta_summary(deltas: Sequence[float]) -> tuple[float, int]:
+    """The mean Paired Delta and the count of positive folds (the 4/5 gate input)."""
+    deltas = [float(d) for d in deltas]
+    mean = sum(deltas) / len(deltas)
+    folds_positive = sum(1 for d in deltas if d > 0)
+    return mean, folds_positive
+
+
+def kill_criterion_outcome(mean_delta: float, kill_delta: float) -> dict[str, Any]:
+    """Apply a candidate's declared kill criterion to its mean Paired Delta.
+
+    The criterion is declared before the run: a mean paired delta *below*
+    ``kill_delta`` on the canonical seed kills the candidate. Recorded either
+    way, so the outcome is in the ledger whether it lived or died.
+    """
+    return {"threshold": float(kill_delta), "dead": float(mean_delta) < float(kill_delta)}
+
+
 def config_hash(config: Mapping[str, Any]) -> str:
     """sha256 of the config's canonical JSON, so "have I tried this?" is a grep.
 
@@ -107,6 +139,8 @@ def build_run_record(
     incumbent_run_id: str | None = None,
     paired_delta: float | None = None,
     folds_positive: int | None = None,
+    fold_deltas: Sequence[float] | None = None,
+    kill_criterion: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble one Run Record — the unit the next CRISP turn reads.
 
@@ -135,6 +169,8 @@ def build_run_record(
         "incumbent_run_id": incumbent_run_id,
         "paired_delta": paired_delta,
         "folds_positive": folds_positive,
+        "fold_deltas": [float(d) for d in fold_deltas] if fold_deltas is not None else None,
+        "kill_criterion": dict(kill_criterion) if kill_criterion is not None else None,
     }
 
 
@@ -176,6 +212,22 @@ def find_run(run_id: str, path: Path | None = None) -> dict[str, Any] | None:
     return match
 
 
+def _latest_run_for(experiment: str, fold_seed: int, path: Path | None = None) -> dict[str, Any] | None:
+    """The most recent Comparison Run of an experiment on a given fold seed.
+
+    Used to resolve a candidate's Incumbent: the pairing is only valid on the
+    shared Canonical Fold Partition, so the fold seed must match.
+    """
+    match: dict[str, Any] | None = None
+    for record in load_records(path):
+        if record.get("experiment") != experiment:
+            continue
+        if record.get("config", {}).get("fold_seed") != fold_seed:
+            continue
+        match = record  # later writes win: the latest run on this seed
+    return match
+
+
 # --------------------------------------------------------------------------- #
 # The Comparison Run itself (needs the ML stack + the gitignored CSVs).
 # --------------------------------------------------------------------------- #
@@ -214,7 +266,14 @@ def run(config) -> dict[str, Any]:
         tr_idx = np.where(fold != k)[0]
         va_idx = np.where(fold == k)[0]
 
-        adapter = adapter_mod.Adapter(scale=config.scale)
+        adapter = adapter_mod.Adapter(
+            scale=config.scale,
+            target_encode=getattr(config, "target_encode", ()),
+            outer_fold=k,
+            validation_index=set(va_idx.tolist()),
+            scale_columns=(frame.INCOME_COLUMN,) if config.scale else (),
+            scale_exclude=tuple(name for name, _ in frame.INCOME_DIGIT_TRANSFORMS),
+        )
         X_tr = adapter.fit_transform(X_train.iloc[tr_idx], y[tr_idx])
         X_va = adapter.transform(X_train.iloc[va_idx])
 
@@ -224,6 +283,26 @@ def run(config) -> dict[str, Any]:
         fold_aucs.append(float(roc_auc_score(y[va_idx], preds)))
 
     oof_auc = float(roc_auc_score(y, oof))
+
+    # A candidate is measured as a Paired Delta against its declared Incumbent —
+    # per-fold on the shared Canonical Fold Partition — and its declared kill
+    # criterion is applied to the result. Recorded either way.
+    incumbent_run_id = paired_delta = folds_positive = deltas = kill = None
+    incumbent_name = getattr(config, "incumbent", None)
+    if incumbent_name:
+        inc = _latest_run_for(incumbent_name, config.fold_seed)
+        if inc is None:
+            print(
+                f"NOTE: incumbent {incumbent_name!r} has no run on fold_seed "
+                f"{config.fold_seed} in the ledger; recording the candidate with "
+                "no Paired Delta. Run the Incumbent first to arm the comparison."
+            )
+        else:
+            deltas = fold_deltas(fold_aucs, inc["fold_aucs"])
+            paired_delta, folds_positive = paired_delta_summary(deltas)
+            incumbent_run_id = inc["run_id"]
+            if getattr(config, "kill_delta", None) is not None:
+                kill = kill_criterion_outcome(paired_delta, config.kill_delta)
 
     rid = run_id(config.name, when=when)
     oof_path = RUNS_DIR / rid / "oof.npy"
@@ -240,6 +319,11 @@ def run(config) -> dict[str, Any]:
         wall_time=time.perf_counter() - t0,
         seeds=config.seeds(),
         when=when,
+        incumbent_run_id=incumbent_run_id,
+        paired_delta=paired_delta,
+        folds_positive=folds_positive,
+        fold_deltas=deltas,
+        kill_criterion=kill,
     )
     # Keep the id and the recorded oof path consistent with the vector on disk.
     record["run_id"] = rid
@@ -265,7 +349,27 @@ def _print_verdict(config, record: Mapping[str, Any]) -> None:
             "a bad model. First divergence hypothesis: bagging_freq. Per-fold: "
             + ", ".join(f"{a:.5f}" for a in record["fold_aucs"])
         )
+    _print_kill_criterion(record)
     print_promotion_verdict(record)
+
+
+def _print_kill_criterion(record: Mapping[str, Any]) -> None:
+    """Print the declared kill-criterion outcome, if the candidate had one."""
+    kill = record.get("kill_criterion")
+    if not kill:
+        return
+    delta = record.get("paired_delta")
+    threshold = kill["threshold"]
+    if kill["dead"]:
+        print(
+            f"KILL CRITERION: DEAD — paired delta {delta:+.5f} < declared "
+            f"threshold +{threshold:.4f}; the candidate is killed as declared."
+        )
+    else:
+        print(
+            f"KILL CRITERION: SURVIVED — paired delta {delta:+.5f} >= declared "
+            f"threshold +{threshold:.4f}; the candidate lives to the verdict rule."
+        )
 
 
 def print_promotion_verdict(record: Mapping[str, Any]) -> str | None:
