@@ -33,6 +33,7 @@ dev = [
 run-experiment = "runner:main"       # run an Experiment as a Comparison Run
 promote = "promote:main"             # promote an Incumbent, recording the rule
 render-ledger = "render:main"        # render the ledger as a Markdown table
+submit = "submission:main"           # fit the mean of the five folds and submit
 record-score = "submission:record_score"  # fill in a submission's public score
 
 [build-system]
