@@ -40,7 +40,7 @@ TEST_CSV = DATA_DIR / "test.csv"
 # returns the computed value and prints it for committing here. Once set, every
 # run asserts against it and a mismatch — reordered rows, dropped rows, or a
 # scikit-learn upgrade changing the split algorithm — fails loudly.
-CANONICAL_FOLD_SHA256: str | None = None
+CANONICAL_FOLD_SHA256: str | None = "a02ae46220be9a54f0b1a0071f8f70fc027aa8a3ad9cff028363abf08dd65b0b"
 
 
 def _load_csv(path: Path):
@@ -62,9 +62,31 @@ def _load_csv(path: Path):
     return df
 
 
+# ``Will_Buy_EV`` ships as the strings "Yes"/"No", not as 0/1. It is encoded
+# here — the one place the target is read — because everything downstream (the
+# stratifier, the model's label, the AUC) needs a number, and encoding it at
+# each of those sites is how two of them end up disagreeing. The levels are
+# asserted rather than assumed, like every other column's.
+TARGET_LEVELS = {"No": 0, "Yes": 1}
+
+
+def _encode_target(df):
+    """Map the target to 0/1 in place, asserting it carries only known levels."""
+    if TARGET_COLUMN not in df.columns:
+        return df
+    mapped = df[TARGET_COLUMN].map(TARGET_LEVELS)
+    if mapped.isna().any():
+        unknown = sorted(set(df[TARGET_COLUMN]) - set(TARGET_LEVELS))
+        raise AssertionError(
+            f"{TARGET_COLUMN} has levels outside {sorted(TARGET_LEVELS)}: {unknown}"
+        )
+    df[TARGET_COLUMN] = mapped.astype("int8")
+    return df
+
+
 def load_train():
     """Read ``train.csv`` in file order, asserting zero missing values."""
-    return _load_csv(TRAIN_CSV)
+    return _encode_target(_load_csv(TRAIN_CSV))
 
 
 def load_test():

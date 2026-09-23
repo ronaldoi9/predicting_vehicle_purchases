@@ -35,9 +35,16 @@ from columns import (
     TARGET_COLUMN,
 )
 
-# The two ordinals share this ordering; carried as a single numeric column so
-# the model gets the ordering without spending one-hot width on it.
-ORDINAL_LEVELS = {"Low": 0, "Medium": 1, "High": 2}
+# The two ordinals do NOT share an encoding, and assuming they did was a bug the
+# build assert caught: Environmental_Concern_Level ships as float64 holding only
+# the integers 1.0-5.0 (#2), while Range_Anxiety_Level is a Low/Medium/High
+# string. Each carries its own map, and concern keeps its own numbering so a
+# level's value means what the column says it means. Both land as a single
+# numeric column, so the model gets the ordering without one-hot width.
+ORDINAL_ENCODINGS: dict[str, dict] = {
+    "Environmental_Concern_Level": {float(v): v for v in range(1, 6)},
+    "Range_Anxiety_Level": {"Low": 0, "Medium": 1, "High": 2},
+}
 
 # Income digit decomposition. The lambdas are plain integer ops, so they mean
 # the same on a Python int (testable without the ML stack) and on a pandas
@@ -100,10 +107,11 @@ def _drop_id_and_target(df):
 def _encode_ordinals(df):
     out = {}
     for col in ORDINAL_COLUMNS:
-        mapped = df[col].map(ORDINAL_LEVELS)
+        levels = ORDINAL_ENCODINGS[col]
+        mapped = df[col].map(levels)
         if mapped.isna().any():
-            unknown = sorted(set(df[col]) - set(ORDINAL_LEVELS))
-            raise AssertionError(f"{col} has levels outside {ORDINAL_LEVELS}: {unknown}")
+            unknown = sorted(set(df[col]) - set(levels))
+            raise AssertionError(f"{col} has levels outside {sorted(levels)}: {unknown}")
         out[col] = mapped.astype("int8")
     return out
 
