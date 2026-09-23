@@ -45,6 +45,21 @@ LGBM_PARAMS: dict[str, Any] = {
 SEED_KEYS = ("seed", "bagging_seed", "feature_fraction_seed", "data_random_seed")
 
 
+def seeded_params(params: Mapping[str, Any], seed: int) -> dict[str, Any]:
+    """A copy of ``params`` with all four instrument seeds set to ``seed``.
+
+    The seed-averaged bag fits the same config once per seed and averages the
+    fold predictions; each member differs only in the four seeds pinned in
+    :data:`SEED_KEYS`. The source mapping is never mutated, so the Incumbent
+    keeps its seed 0.
+    """
+    out = dict(params)
+    for k in SEED_KEYS:
+        if k in out:
+            out[k] = int(seed)
+    return out
+
+
 @dataclass(frozen=True)
 class Experiment:
     """A frozen, named configuration stating one hypothesis."""
@@ -71,6 +86,20 @@ class Experiment:
     # least this many of five folds. ``None`` for a candidate judged on
     # ``kill_delta`` instead (the two are mutually exclusive per declaration).
     kill_min_folds_positive: int | None = None
+    # The seed-averaged bag (#19): the seeds whose fold predictions are averaged.
+    # Empty for the Incumbent; a candidate adds exactly this one field. Its kill
+    # criterion is cost-versus-gain: each extra fit must earn ``kill_value_per_run``
+    # AUC, so the break-even gain is ``kill_value_per_run * (len(seed_bag) - 1)``.
+    seed_bag: tuple[int, ...] = ()
+    kill_value_per_run: float | None = None
+    # SMOTENC (#19): the categorical-aware oversampler, fitted inside the training
+    # fold only, with income digits regenerated from the synthetic income. ``None``
+    # for the Incumbent; the candidate sets it to ``adapter.OVERSAMPLE_SMOTENC``.
+    oversample: str | None = None
+    # Conservative tuning (#19): the 2h machine-time box its kill criterion is
+    # scored against — 2h without +0.0003 -> dead. ``None`` for a candidate not
+    # time-boxed (the tuning candidate combines it with ``kill_delta``).
+    kill_time_budget_s: float | None = None
     health_gate: float = 0.9434
     target_oof: float = 0.94167
 
@@ -92,6 +121,8 @@ class Experiment:
             "fold_seed": self.fold_seed,
             "scale": self.scale,
             "target_encode": list(self.target_encode),
+            "seed_bag": list(self.seed_bag),
+            "oversample": self.oversample,
             "params": dict(self.params),
         }
 
@@ -244,11 +275,125 @@ AGE_TE = replace(
 )
 
 
+# --------------------------------------------------------------------------- #
+# The tail of the queue (#19): three candidates nothing measured so far suggests
+# will pay, each a single-field change against the Incumbent and each boxed by a
+# kill criterion declared before it runs so that none can absorb the week. A
+# multi-family blend is NOT built here — it enters only if these three exhaust
+# before 29/09, and competes for time rather than being assumed (a published
+# finding for this competition is that a single tuned LightGBM beat a 7-model
+# stack).
+# --------------------------------------------------------------------------- #
+
+# Seed-averaged bag over three seeds. Variance reduction, expected +0.0002. The
+# member configs differ only in the four instrument seeds (see seeded_params);
+# the bag averages their fold predictions before scoring.
+SEED_BAG: tuple[int, ...] = (0, 1, 2)
+
+# The bag's cost-versus-gain kill: each *extra* full-model fit must earn at least
+# this much AUC. Three seeds = two extra fits, so break-even is the expected
+# +0.0002. Below it, the compute cost exceeds the measured gain and the bag dies.
+SEED_BAG_VALUE_PER_RUN = 0.0001
+
+SEED_BAG_EXPERIMENT = replace(
+    BASELINE,
+    name="seed_bag",
+    hypothesis=(
+        "Averaging the fold predictions of three seeds (0, 1, 2) reduces variance "
+        "for an expected +0.0002, bought only if it is cheaper than it is worth. "
+        "The three members differ only in the four instrument seeds; every other "
+        "field is the Incumbent's. Single-field change against the Incumbent: "
+        "seed_bag = (0, 1, 2). Kill criterion, declared before running: cost "
+        "versus gain — each of the two extra fits must earn +0.0001, so a paired "
+        "delta below the break-even +0.0002 means compute cost exceeds measured "
+        "gain and the bag is dead."
+    ),
+    seed_bag=SEED_BAG,
+    incumbent="baseline",
+    kill_value_per_run=SEED_BAG_VALUE_PER_RUN,
+    target_oof=0.94372,
+)
+
+
+# SMOTENC — categorical-aware oversampling, fitted inside the training fold only,
+# with income digits regenerated from the synthetic income so the Frame stays
+# self-consistent. sampling_strategy=0.5. Plain SMOTE is excluded outright (see
+# adapter): interpolating Age to 43.7 and producing digits that no longer derive
+# from their own income destroys Resolution, the one axis that pays. No class
+# weighting is used anywhere else — at 17.5% positive there are ~117,000
+# positives and ROC AUC is rank-based. The contract constants live in adapter.
+from adapter import OVERSAMPLE_SMOTENC, SMOTENC_SAMPLING_STRATEGY  # noqa: E402
+
+SMOTENC_KILL_DELTA = 0.0003
+
+SMOTENC = replace(
+    BASELINE,
+    name="smotenc",
+    hypothesis=(
+        "Oversampling the minority class with SMOTENC at sampling_strategy=0.5, "
+        "fitted inside the training fold only and with income digits regenerated "
+        "from the synthetic income so the Frame stays self-consistent, beats the "
+        "Incumbent. Plain SMOTE is excluded outright: interpolating Age to 43.7 "
+        "and producing digits that no longer derive from their own income "
+        "destroys Resolution, the one axis that pays. Oversampling before the "
+        "split is the failure mode that would make this test appear to succeed, "
+        "so it is fitted strictly inside the fold. Single-field change against "
+        "the Incumbent: oversample = smotenc. Kill criterion, declared before "
+        "running: paired delta < +0.0003 -> the candidate is dead."
+    ),
+    oversample=OVERSAMPLE_SMOTENC,
+    incumbent="baseline",
+    kill_delta=SMOTENC_KILL_DELTA,
+    target_oof=0.94372,
+)
+
+
+# Conservative tuning of the depth/leaves/regularisation surface. max_bin is
+# explicitly NOT part of this — it was reclassified as the Resolution control
+# and has its own allocated experiment — so it is held at the Incumbent's 511.
+CONSERVATIVE_PARAMS: dict[str, Any] = {
+    **LGBM_PARAMS,
+    "num_leaves": 63,          # fewer leaves than the Incumbent's 127
+    "max_depth": 8,            # an explicit depth cap (the Incumbent leaves it -1)
+    "min_child_samples": 200,  # larger leaves — regularisation
+    "min_split_gain": 0.01,    # a minimum gain to split — regularisation
+    "lambda_l1": 1.0,          # L1 regularisation
+    "lambda_l2": 1.0,          # L2 regularisation
+    # max_bin is untouched: it stays at the Incumbent's 511 above.
+}
+
+CONSERVATIVE_KILL_DELTA = 0.0003
+CONSERVATIVE_TIME_BUDGET_S = 7200.0  # the 2h machine-time box
+
+CONSERVATIVE_TUNING = replace(
+    BASELINE,
+    name="conservative_tuning",
+    hypothesis=(
+        "Regularising the depth/leaves/regularisation surface — fewer leaves, an "
+        "explicit depth cap, larger leaves and L1/L2 penalties — beats the "
+        "Incumbent. max_bin is explicitly NOT part of this: it was reclassified "
+        "as the Resolution control and has its own allocated experiment, so it "
+        "stays at the Incumbent's 511. Single-field change against the Incumbent: "
+        "params replaced on the depth/leaves/regularisation surface only. Kill "
+        "criterion, declared before running: 2h of machine time without +0.0003 "
+        "-> dead."
+    ),
+    params=CONSERVATIVE_PARAMS,
+    incumbent="baseline",
+    kill_delta=CONSERVATIVE_KILL_DELTA,
+    kill_time_budget_s=CONSERVATIVE_TIME_BUDGET_S,
+    target_oof=0.94372,
+)
+
+
 _REGISTRY: dict[str, Experiment] = {
     TRACER_RAW13.name: TRACER_RAW13,
     BASELINE.name: BASELINE,
     INCOME_TE.name: INCOME_TE,
     AGE_TE.name: AGE_TE,
+    SEED_BAG_EXPERIMENT.name: SEED_BAG_EXPERIMENT,
+    SMOTENC.name: SMOTENC,
+    CONSERVATIVE_TUNING.name: CONSERVATIVE_TUNING,
     **{exp.name: exp for exp in MAX_BIN_EXPERIMENTS},
 }
 

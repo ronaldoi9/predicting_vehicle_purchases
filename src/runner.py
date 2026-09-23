@@ -112,6 +112,50 @@ def folds_positive_kill_outcome(
     }
 
 
+def seed_bag_kill_outcome(
+    mean_delta: float, n_seeds: int, value_per_run: float
+) -> dict[str, Any]:
+    """Apply the seed-averaged bag's cost-versus-gain kill (#19).
+
+    The bag fits the same config once per seed and averages the fold
+    predictions, so ``n_seeds - 1`` fits are *extra* over the single Incumbent
+    fit. Each extra fit must earn ``value_per_run`` AUC, so the break-even gain
+    is ``value_per_run * (n_seeds - 1)``. A mean Paired Delta below that means
+    the compute cost exceeds the measured gain and the bag is dead. Recorded
+    either way.
+    """
+    extra_runs = int(n_seeds) - 1
+    required_gain = float(value_per_run) * extra_runs
+    return {
+        "n_seeds": int(n_seeds),
+        "extra_runs": extra_runs,
+        "value_per_run": float(value_per_run),
+        "required_gain": required_gain,
+        "dead": float(mean_delta) < required_gain,
+    }
+
+
+def tuning_kill_outcome(
+    mean_delta: float, elapsed_s: float, kill_delta: float, time_budget_s: float
+) -> dict[str, Any]:
+    """Apply the conservative-tuning kill: 2h without +``kill_delta`` -> dead (#19).
+
+    Two ways to die, declared before the run: the mean Paired Delta falls below
+    ``kill_delta``, or the machine time spent exceeds ``time_budget_s`` (the 2h
+    box) — blowing the budget kills the candidate even if the target was reached.
+    Recorded either way.
+    """
+    over_budget = float(elapsed_s) > float(time_budget_s)
+    under_target = float(mean_delta) < float(kill_delta)
+    return {
+        "threshold": float(kill_delta),
+        "time_budget_s": float(time_budget_s),
+        "elapsed_s": float(elapsed_s),
+        "over_budget": over_budget,
+        "dead": under_target or over_budget,
+    }
+
+
 def config_hash(config: Mapping[str, Any]) -> str:
     """sha256 of the config's canonical JSON, so "have I tried this?" is a grep.
 
@@ -260,6 +304,7 @@ def run(config) -> dict[str, Any]:
 
     import adapter as adapter_mod
     import data
+    import experiments as experiments_mod
     import frame
     import models
     from columns import TARGET_COLUMN
@@ -278,6 +323,11 @@ def run(config) -> dict[str, Any]:
 
     X_train, _X_test = frame.build_frame(train, test, config.frame)
 
+    # The seed-averaged bag fits the same config once per seed and averages the
+    # fold predictions; an empty bag is the single Incumbent fit at its own seed.
+    seed_bag = getattr(config, "seed_bag", ()) or ()
+    oversample = getattr(config, "oversample", None)
+
     oof = np.zeros(len(y), dtype=np.float64)
     fold_aucs: list[float] = []
     for k in range(data.N_FOLDS):
@@ -291,12 +341,30 @@ def run(config) -> dict[str, Any]:
             validation_index=set(va_idx.tolist()),
             scale_columns=(frame.INCOME_COLUMN,) if config.scale else (),
             scale_exclude=tuple(name for name, _ in frame.INCOME_DIGIT_TRANSFORMS),
+            oversample=oversample,
+            oversample_continuous_columns=(
+                (frame.INCOME_COLUMN,) + tuple(n for n, _ in frame.INCOME_DIGIT_TRANSFORMS)
+                if oversample else ()
+            ),
+            income_column=frame.INCOME_COLUMN if oversample else None,
+            income_digit_transforms=frame.INCOME_DIGIT_TRANSFORMS if oversample else (),
         )
         X_tr = adapter.fit_transform(X_train.iloc[tr_idx], y[tr_idx])
         X_va = adapter.transform(X_train.iloc[va_idx])
+        # Oversampling synthesises training rows, so the model is fitted on the
+        # resampled targets, not the original fold slice.
+        y_fit = adapter.resampled_y if adapter.resampled_y is not None else y[tr_idx]
 
-        model = models.fit(X_tr, y[tr_idx], config.params, num_boost_round=config.num_boost_round)
-        preds = models.predict(model, X_va)
+        if seed_bag:
+            member_preds = []
+            for s in seed_bag:
+                params = experiments_mod.seeded_params(config.params, s)
+                m = models.fit(X_tr, y_fit, params, num_boost_round=config.num_boost_round)
+                member_preds.append(models.predict(m, X_va))
+            preds = np.mean(np.asarray(member_preds), axis=0)
+        else:
+            model = models.fit(X_tr, y_fit, config.params, num_boost_round=config.num_boost_round)
+            preds = models.predict(model, X_va)
         oof[va_idx] = preds
         fold_aucs.append(float(roc_auc_score(y[va_idx], preds)))
 
@@ -319,7 +387,20 @@ def run(config) -> dict[str, Any]:
             deltas = fold_deltas(fold_aucs, inc["fold_aucs"])
             paired_delta, folds_positive = paired_delta_summary(deltas)
             incumbent_run_id = inc["run_id"]
-            if getattr(config, "kill_delta", None) is not None:
+            elapsed = time.perf_counter() - t0
+            if getattr(config, "kill_time_budget_s", None) is not None:
+                # Conservative tuning: 2h without +kill_delta -> dead (blowing the
+                # machine-time box kills it even if the target was reached).
+                kill = tuning_kill_outcome(
+                    paired_delta, elapsed, config.kill_delta, config.kill_time_budget_s
+                )
+            elif getattr(config, "kill_value_per_run", None) is not None:
+                # The seed bag's cost-versus-gain kill: each extra fit must earn
+                # kill_value_per_run AUC.
+                kill = seed_bag_kill_outcome(
+                    paired_delta, len(config.seed_bag), config.kill_value_per_run
+                )
+            elif getattr(config, "kill_delta", None) is not None:
                 kill = kill_criterion_outcome(paired_delta, config.kill_delta)
             elif getattr(config, "kill_min_folds_positive", None) is not None:
                 kill = folds_positive_kill_outcome(
@@ -385,6 +466,41 @@ def _print_kill_criterion(record: Mapping[str, Any]) -> None:
     kill = record.get("kill_criterion")
     if not kill:
         return
+    delta = record.get("paired_delta")
+    if "required_gain" in kill:
+        # The seed bag's cost-versus-gain kill.
+        req = kill["required_gain"]
+        extra = kill["extra_runs"]
+        if kill["dead"]:
+            print(
+                f"KILL CRITERION: DEAD — paired delta {delta:+.5f} < break-even "
+                f"+{req:.5f} for {extra} extra fit(s); compute cost exceeds the "
+                "measured gain and the bag is dead."
+            )
+        else:
+            print(
+                f"KILL CRITERION: SURVIVED — paired delta {delta:+.5f} >= break-even "
+                f"+{req:.5f} for {extra} extra fit(s); the bag earns its compute."
+            )
+        return
+    if "time_budget_s" in kill:
+        # Conservative tuning: 2h without +threshold -> dead.
+        thr = kill["threshold"]
+        budget = kill["time_budget_s"]
+        if kill["dead"]:
+            why = (
+                f"machine time {kill['elapsed_s']:.0f}s exceeded the {budget:.0f}s box"
+                if kill.get("over_budget")
+                else f"paired delta {delta:+.5f} < declared +{thr:.4f}"
+            )
+            print(f"KILL CRITERION: DEAD — {why}; the candidate is killed as declared.")
+        else:
+            print(
+                f"KILL CRITERION: SURVIVED — paired delta {delta:+.5f} >= declared "
+                f"+{thr:.4f} within the {budget:.0f}s box; the candidate lives to "
+                "the verdict rule."
+            )
+        return
     if "min_folds_positive" in kill:
         fp = kill["folds_positive"]
         need = kill["min_folds_positive"]
@@ -400,7 +516,6 @@ def _print_kill_criterion(record: Mapping[str, Any]) -> None:
                 f"declared {need}/{n}; the candidate lives to the verdict rule."
             )
         return
-    delta = record.get("paired_delta")
     threshold = kill["threshold"]
     if kill["dead"]:
         print(

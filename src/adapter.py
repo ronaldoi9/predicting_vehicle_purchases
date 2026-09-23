@@ -46,6 +46,14 @@ PRIOR_WEIGHT = 20.0  # additive-smoothing prior weight
 # raw value, so income stays individually addressable alongside its encoding.
 TE_SUFFIX = "_te"
 
+# Oversampling (#19). Only the categorical-aware SMOTENC is permitted, and it is
+# fitted strictly inside the training fold. Plain ``SMOTE`` is excluded outright:
+# interpolating Age to 43.7 and producing income digits that no longer derive
+# from their own income destroys Resolution, the one axis that pays.
+OVERSAMPLE_SMOTENC = "smotenc"
+SMOTENC_SAMPLING_STRATEGY = 0.5  # lift the minority share to 0.5 inside the fold
+_VALID_OVERSAMPLE = (None, OVERSAMPLE_SMOTENC)
+
 
 def inner_seed(outer_fold: int) -> int:
     """The inner split's ``random_state`` for a given outer fold.
@@ -123,7 +131,21 @@ class Adapter:
         scale_exclude: Sequence[str] = (),
         prior_weight: float = PRIOR_WEIGHT,
         inner_splits: int = INNER_SPLITS,
+        oversample: str | None = None,
+        oversample_continuous_columns: Sequence[str] = (),
+        income_column: str | None = None,
+        income_digit_transforms: Sequence = (),
     ) -> None:
+        # Plain SMOTE is refused the moment the Adapter is constructed — before
+        # any import, so the exclusion holds even where imbalanced-learn is
+        # absent. Only the categorical-aware SMOTENC (or no oversampling) is
+        # permitted.
+        assert oversample in _VALID_OVERSAMPLE, (
+            f"oversample must be None or {OVERSAMPLE_SMOTENC!r}; plain SMOTE is "
+            "excluded outright because interpolating Age and producing income "
+            "digits that no longer derive from their own income destroys "
+            f"Resolution — use SMOTENC. Got {oversample!r}."
+        )
         self.scale = scale
         self.target_encode = tuple(target_encode)
         self.outer_fold = outer_fold
@@ -132,7 +154,12 @@ class Adapter:
         self.scale_exclude = tuple(scale_exclude)
         self.prior_weight = prior_weight
         self.inner_splits = inner_splits
+        self.oversample = oversample
+        self.oversample_continuous_columns = tuple(oversample_continuous_columns)
+        self.income_column = income_column
+        self.income_digit_transforms = tuple(income_digit_transforms)
 
+        self.resampled_y = None  # the oversampled training targets, once fitted
         self._fitted = False
         self._columns = None  # input column layout captured at fit
         self._scaler = None
@@ -159,14 +186,53 @@ class Adapter:
         self._columns = list(X_tr.columns)
 
         out = X_tr
+        y_work = y_tr
+        # Oversampling comes first and strictly inside the fold: it synthesises
+        # new *training* rows, so the target encoding and scaling that follow see
+        # the resampled frame. resampled_y is what the model must be fitted on.
+        if self.oversample:
+            out, y_work = self._oversample(out, y_work)
+            self.resampled_y = y_work
+
         if self.target_encode:
-            out = self._encode_training_rows(X_tr, y_tr)
+            out = self._encode_training_rows(out, y_work)
 
         if self.scale:
             self._fit_scaler(out)
 
         self._fitted = True
         return self._apply_scale(out)
+
+    # ---- oversampling (fitted inside the training fold only) --------------- #
+    def _oversample(self, X, y):
+        """Resample the training rows with SMOTENC, then regenerate income digits.
+
+        SMOTENC synthesises minority rows by interpolating the continuous columns
+        and picking the most frequent category among neighbours for the rest — so
+        Age, being categorical to it, is never interpolated to 43.7 and keeps its
+        45 addressable values. The income digit columns *are* continuous, so
+        SMOTENC interpolates them into values that no longer derive from their own
+        income; we discard those and regenerate each digit column from the
+        (possibly synthetic) income, so the Frame stays self-consistent.
+        """
+        import numpy as np
+        from imblearn.over_sampling import SMOTENC
+
+        continuous = set(self.oversample_continuous_columns)
+        cat_features = [i for i, c in enumerate(X.columns) if c not in continuous]
+        sampler = SMOTENC(
+            categorical_features=cat_features,
+            sampling_strategy=SMOTENC_SAMPLING_STRATEGY,
+            random_state=inner_seed(self.outer_fold or 0),
+        )
+        X_res, y_res = sampler.fit_resample(X, y)
+
+        if self.income_column is not None and self.income_digit_transforms:
+            income = X_res[self.income_column]
+            for name, op in self.income_digit_transforms:
+                X_res[name] = op(income).astype(X[name].dtype)
+
+        return X_res, np.asarray(y_res)
 
     def transform(self, X_va):
         """Transform validation/test rows with the fold-fitted state only.
