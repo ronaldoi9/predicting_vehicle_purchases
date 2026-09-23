@@ -209,7 +209,13 @@ def git_capture(repo_root: Path | None = None) -> dict[str, Any]:
 
     try:
         sha = _git("rev-parse", "HEAD")
-        dirty = bool(_git("status", "--porcelain"))
+        # ``dirty`` answers "was the code that produced this number committed?",
+        # so the ledger is excluded from the question. It is append-only and the
+        # previous run's own line is normally sitting in it uncommitted, which
+        # would otherwise mark every run after the first as dirty and make the
+        # flag useless exactly when it matters.
+        status = _git("status", "--porcelain", "--", ".", ":(exclude)ledger")
+        dirty = bool(status)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return {"git_sha": None, "dirty": None}
     return {"git_sha": sha, "dirty": dirty}
