@@ -69,8 +69,9 @@ def test_categorical_list_is_committed() -> None:
 
 def test_no_column_selection_by_dtype() -> None:
     """The whole reason columns.py exists: nothing inspects dtypes to select."""
-    banned_calls = {"select_dtypes"}
-    banned_attrs = {"select_dtypes"}
+    # Both the `.select_dtypes(...)` selector and bare `.dtypes` comparisons
+    # (`df.dtypes == 'object'`) count as dtype-driven column selection.
+    banned_attrs = {"select_dtypes", "dtypes"}
     offenders: list[str] = []
 
     for path in SRC.glob("*.py"):
@@ -78,9 +79,5 @@ def test_no_column_selection_by_dtype() -> None:
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr in banned_attrs:
                 offenders.append(f"{path.name}: .{node.attr}")
-            # Catch `df.dtypes == 'object'` style dtype comparisons.
-            if isinstance(node, ast.Attribute) and node.attr in {"dtypes"}:
-                offenders.append(f"{path.name}: .dtypes")
 
     assert not offenders, f"dtype-based column selection found: {offenders}"
-    assert banned_calls  # sanity: the guard list is non-empty
