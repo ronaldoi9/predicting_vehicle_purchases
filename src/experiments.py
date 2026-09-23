@@ -66,6 +66,11 @@ class Experiment:
     # canonical seed kills the candidate). Both ``None`` for the Incumbent runs.
     incumbent: str | None = None
     kill_delta: float | None = None
+    # The Resolution sweep's kill criterion is folds-positive, not a mean-delta
+    # threshold: a max_bin value survives only if it beats the Incumbent in at
+    # least this many of five folds. ``None`` for a candidate judged on
+    # ``kill_delta`` instead (the two are mutually exclusive per declaration).
+    kill_min_folds_positive: int | None = None
     health_gate: float = 0.9434
     target_oof: float = 0.94167
 
@@ -160,10 +165,91 @@ INCOME_TE = replace(
 )
 
 
+# --------------------------------------------------------------------------- #
+# The Resolution axis (#18): the only axis this dataset's representation has been
+# shown to pay on. Two candidates, each a single-field change against the
+# Incumbent, each with a kill criterion declared before it runs.
+# --------------------------------------------------------------------------- #
+
+# The max_bin sweep. max_bin is the Resolution control, not an ordinary tuning
+# knob: it decides whether a histogram-binned tree can address individual income
+# values or merges them into a range. This is why the published digit
+# decomposition works at all — the leak hunt showed the apparent digit signal is
+# a resolution effect (income % 100 scores 0.50001 on non-floor rows). Swept
+# around the Incumbent's 511; every value stays >= models.MIN_MAX_BIN (64), so
+# the 45 Age values remain individually addressable at each resolution tested.
+MAX_BIN_SWEEP: tuple[int, ...] = (255, 1023, 2047)
+
+# The sweep's kill criterion, declared before running: a value survives only if
+# it beats the Incumbent in at least this many of five folds. No value clearing
+# it freezes the Resolution axis at the Incumbent's 511.
+MAX_BIN_KILL_MIN_FOLDS_POSITIVE = 4
+
+
+def _max_bin_candidate(max_bin: int) -> Experiment:
+    """One max_bin value as a Paired-Delta Experiment against the Incumbent.
+
+    Single-field change: the Incumbent's params with ``max_bin`` replaced, so the
+    one-change discipline is literal — every other param, and every other
+    modelling field, is the Incumbent's. Fixed rounds and early stopping off are
+    inherited from the Incumbent and the Comparison-Run protocol.
+    """
+    return replace(
+        BASELINE,
+        name=f"max_bin_{max_bin}",
+        hypothesis=(
+            f"Setting max_bin={max_bin} lets the histogram-binned tree address "
+            "income at a different Resolution than the Incumbent's 511. max_bin "
+            "is the Resolution control, not a tuning knob: it decides whether the "
+            "tree sees individual income values or a merged range. Single-field "
+            f"change against the Incumbent: params['max_bin'] = {max_bin}. Kill "
+            "criterion, declared before running: it must beat the Incumbent in at "
+            "least 4 of 5 folds, else the Resolution axis freezes at 511."
+        ),
+        params={**LGBM_PARAMS, "max_bin": max_bin},
+        incumbent="baseline",
+        kill_min_folds_positive=MAX_BIN_KILL_MIN_FOLDS_POSITIVE,
+        target_oof=0.94372,
+    )
+
+
+MAX_BIN_EXPERIMENTS: tuple[Experiment, ...] = tuple(
+    _max_bin_candidate(mb) for mb in MAX_BIN_SWEEP
+)
+
+
+# Age as a 45-level target-encoded lookup — the honest alternative to relying on
+# max_bin to deliver the lookup. Age carries a 9-sigma non-monotone residual
+# invisible to single-feature AUC. The TE runs under the exact nested cross-fit
+# contract the income TE uses (Adapter, inner K=5, seed 100+fold, prior weight
+# 20), and adds an `Age_te` column rather than replacing raw Age, so all 45
+# values stay individually addressable — the Age invariant respected either way.
+AGE_TE = replace(
+    BASELINE,
+    name="age_te",
+    hypothesis=(
+        "Target-encoding Age as a 45-level lookup under the Adapter's nested "
+        "cross-fit contract beats the Incumbent. Age carries a 9-sigma "
+        "non-monotone residual invisible to single-feature AUC; the TE is the "
+        "honest alternative to relying on max_bin for the lookup. The TE adds an "
+        "Age_te column, never replacing raw Age, so all 45 values stay "
+        "individually addressable (the Age invariant). Single-field change "
+        "against the Incumbent: target_encode = (Age,). Kill criterion, declared "
+        "before running: paired delta < +0.0001 -> the candidate is dead."
+    ),
+    target_encode=("Age",),
+    incumbent="baseline",
+    kill_delta=0.0001,
+    target_oof=0.94372,
+)
+
+
 _REGISTRY: dict[str, Experiment] = {
     TRACER_RAW13.name: TRACER_RAW13,
     BASELINE.name: BASELINE,
     INCOME_TE.name: INCOME_TE,
+    AGE_TE.name: AGE_TE,
+    **{exp.name: exp for exp in MAX_BIN_EXPERIMENTS},
 }
 
 

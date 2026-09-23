@@ -94,6 +94,24 @@ def kill_criterion_outcome(mean_delta: float, kill_delta: float) -> dict[str, An
     return {"threshold": float(kill_delta), "dead": float(mean_delta) < float(kill_delta)}
 
 
+def folds_positive_kill_outcome(
+    folds_positive: int, min_folds_positive: int, n_folds: int = 5
+) -> dict[str, Any]:
+    """Apply a folds-positive kill criterion — the Resolution sweep's rule.
+
+    The ``max_bin`` sweep is not judged on a mean-delta threshold: a value
+    survives only if it beats the Incumbent in at least ``min_folds_positive`` of
+    ``n_folds`` folds, else the Resolution axis freezes at the Incumbent's value.
+    Recorded either way, so the outcome is in the ledger whether it lived or died.
+    """
+    return {
+        "min_folds_positive": int(min_folds_positive),
+        "n_folds": int(n_folds),
+        "folds_positive": int(folds_positive),
+        "dead": int(folds_positive) < int(min_folds_positive),
+    }
+
+
 def config_hash(config: Mapping[str, Any]) -> str:
     """sha256 of the config's canonical JSON, so "have I tried this?" is a grep.
 
@@ -303,6 +321,10 @@ def run(config) -> dict[str, Any]:
             incumbent_run_id = inc["run_id"]
             if getattr(config, "kill_delta", None) is not None:
                 kill = kill_criterion_outcome(paired_delta, config.kill_delta)
+            elif getattr(config, "kill_min_folds_positive", None) is not None:
+                kill = folds_positive_kill_outcome(
+                    folds_positive, config.kill_min_folds_positive
+                )
 
     rid = run_id(config.name, when=when)
     oof_path = RUNS_DIR / rid / "oof.npy"
@@ -354,9 +376,29 @@ def _print_verdict(config, record: Mapping[str, Any]) -> None:
 
 
 def _print_kill_criterion(record: Mapping[str, Any]) -> None:
-    """Print the declared kill-criterion outcome, if the candidate had one."""
+    """Print the declared kill-criterion outcome, if the candidate had one.
+
+    Two shapes: the mean-delta threshold (income/Age TE) and the Resolution
+    sweep's folds-positive rule (a value must beat the Incumbent in at least
+    ``min_folds_positive`` of ``n_folds`` folds, else the axis freezes).
+    """
     kill = record.get("kill_criterion")
     if not kill:
+        return
+    if "min_folds_positive" in kill:
+        fp = kill["folds_positive"]
+        need = kill["min_folds_positive"]
+        n = kill["n_folds"]
+        if kill["dead"]:
+            print(
+                f"KILL CRITERION: DEAD — positive in only {fp}/{n} folds < "
+                f"declared {need}/{n}; the Resolution axis freezes at 511."
+            )
+        else:
+            print(
+                f"KILL CRITERION: SURVIVED — positive in {fp}/{n} folds >= "
+                f"declared {need}/{n}; the candidate lives to the verdict rule."
+            )
         return
     delta = record.get("paired_delta")
     threshold = kill["threshold"]
