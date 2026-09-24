@@ -510,27 +510,44 @@ def run(config) -> dict[str, Any]:
 
 
 def confirm(config) -> dict[str, Any]:
-    """Run a Confirmation Run of one config across fold seeds 0/1/2 and record it.
+    """Run a Confirmation Run across fold seeds 0/1/2 and read whether it passes.
 
-    Band (iii)'s freeze move: re-run the standing Incumbent (``config``) on each
-    of :data:`verdict.CONFIRMATION_SEEDS`, appending a Run Record per seed via the
-    single :func:`run` path (so each seed's ledger write, fold assert and git
-    capture happen in one place), then read the spread with
-    :func:`confirmation_summary`. Deliberately not a config hash for identity —
-    one config runs three times and :func:`run_id` is timestamp-based so the
-    repetitions do not collide.
+    Two shapes, and issue #6 only gates a submission with the first:
 
-    Heavy: it calls :func:`run` three times, so it only executes where the ML
-    stack and the gitignored CSVs are present. The summary maths is pure and
-    tested separately.
+    - **A candidate's** Confirmation Run re-runs *candidate and Incumbent* on
+      each seed and requires the paired delta to keep its sign on all three.
+      Re-running the candidate alone measures nothing: the seeds move the
+      partition, so the candidate's own OOF wanders for reasons that have
+      nothing to do with the change under test. The pairing is the point.
+    - **The standing Incumbent's** freeze-time run (band (iii)) has nothing to
+      pair against, so it is read as the spread of its OOF across the seeds.
+
+    Both are reported. The Incumbent is run first on each seed when it has no
+    run there yet, so the pairing is computable; every execution goes through
+    the single :func:`run` path, so each seed's ledger write, fold assert and
+    git capture happen in one place.
+
+    Heavy: up to six Comparison Runs, so it only executes where the ML stack
+    and the gitignored CSVs are present. The summary maths is pure and tested
+    separately.
     """
     import verdict
     from dataclasses import replace
 
+    import experiments as experiments_mod
+
+    incumbent_name = getattr(config, "incumbent", None)
     per_seed: dict[int, float] = {}
+    per_seed_delta: dict[int, float] = {}
     for seed in verdict.CONFIRMATION_SEEDS:
+        if incumbent_name and _latest_run_for(incumbent_name, seed) is None:
+            # Arm the pairing on this seed before the candidate runs on it.
+            run(replace(experiments_mod.resolve(incumbent_name), fold_seed=seed))
         record = run(replace(config, fold_seed=seed))
         per_seed[seed] = record["oof_auc"]
+        if record.get("paired_delta") is not None:
+            per_seed_delta[seed] = float(record["paired_delta"])
+
     summary = confirmation_summary(per_seed)
     print(
         f"Confirmation Run of {config.name!r} across fold seeds "
@@ -540,6 +557,31 @@ def confirm(config) -> dict[str, Any]:
         + ", ".join(f"{s}:{a:.5f}" for s, a in zip(summary["seeds"], summary["oof_aucs"]))
         + ")."
     )
+
+    if incumbent_name:
+        seeds = tuple(verdict.CONFIRMATION_SEEDS)
+        if len(per_seed_delta) != len(seeds):
+            missing = [s for s in seeds if s not in per_seed_delta]
+            summary["paired_deltas"] = None
+            summary["sign_holds"] = None
+            print(
+                f"CONFIRMATION INCONCLUSIVE — no Paired Delta against "
+                f"{incumbent_name!r} on fold seed(s) {missing}. The gate in #6 "
+                "requires candidate and Incumbent on all three seeds; nothing "
+                "may be submitted on this result."
+            )
+        else:
+            deltas = [per_seed_delta[s] for s in seeds]
+            holds = verdict.sign_holds(deltas)
+            summary["paired_deltas"] = deltas
+            summary["sign_holds"] = holds
+            shown = ", ".join(f"{s}:{d:+.5f}" for s, d in zip(seeds, deltas))
+            print(
+                f"CONFIRMATION {'PASSED' if holds else 'FAILED'} — paired delta vs "
+                f"{incumbent_name!r} ({shown}); the sign "
+                f"{'holds' if holds else 'does not hold'} on all "
+                f"{len(seeds)} seeds."
+            )
     return summary
 
 
