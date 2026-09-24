@@ -1,0 +1,1 @@
+{"promoted_run_id": "20260923T220635.401734Z-income_te", "incumbent_run_id": "20260923T211204.465162Z-baseline", "paired_delta": 0.0011446810989976576, "folds_positive": 5, "rule": "mean paired delta >= 0.0003 on the canonical seed", "reason": "mean paired delta +0.00114 >= 0.0003 on the canonical seed", "timestamp": "2026-09-24T01:10:15.049478+00:00"}
