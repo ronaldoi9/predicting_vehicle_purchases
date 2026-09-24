@@ -387,6 +387,62 @@ CONSERVATIVE_TUNING = replace(
 
 
 # --------------------------------------------------------------------------- #
+# Stacking the band (ii) survivors. Three candidates beat the turn-1 Incumbent
+# on the canonical seed — income_te +0.00114, conservative_tuning +0.00063,
+# seed_bag +0.00032 — but each was measured against the SAME reference, so the
+# deltas are not additive and adding them up would be exactly the arithmetic a
+# Paired Delta exists to forbid. Stacking is a fresh measurement, declared here
+# as a chain: each candidate changes one field against the candidate below it,
+# and names that candidate as its Incumbent.
+#
+# These are follow-ups to the queue, not members of it: BAND_II_QUEUE keeps its
+# declared order untouched, because rewriting it after the fact would make the
+# runs already in the ledger unreadable against their own declaration.
+# --------------------------------------------------------------------------- #
+
+INCOME_TE_TUNED = replace(
+    INCOME_TE,
+    name="income_te_tuned",
+    hypothesis=(
+        "The regularised depth/leaves/regularisation surface still pays once the "
+        "nested cross-fit income target encoding is in the Frame. Both beat the "
+        "turn-1 Incumbent alone (+0.00114 and +0.00063), and the open question is "
+        "whether they buy the same thing: a tuned tree may already be extracting "
+        "what the encoding supplies, in which case the stack lands well under the "
+        "sum. Single-field change against the income_te Incumbent: params "
+        "replaced on the depth/leaves/regularisation surface only, max_bin left "
+        "at 511 where the Resolution sweep froze it. Kill criterion, declared "
+        "before running: paired delta < +0.0003 -> the stack does not pay and "
+        "income_te stands alone."
+    ),
+    params=CONSERVATIVE_PARAMS,
+    incumbent="income_te",
+    kill_delta=0.0003,
+)
+
+
+INCOME_TE_TUNED_BAG = replace(
+    INCOME_TE_TUNED,
+    name="income_te_tuned_bag",
+    hypothesis=(
+        "Seed-averaging still earns its compute on top of the tuned, "
+        "target-encoded stack. The bag is the most likely of the three survivors "
+        "to stack cleanly, because it is orthogonal to both — it changes only the "
+        "four instrument seeds and averages three members — but 'most likely' is "
+        "not measured. Single-field change against the income_te_tuned "
+        "Incumbent: seed_bag = (0, 1, 2). Kill criterion, declared before "
+        "running: the same break-even as the standalone bag — each of the two "
+        "extra fits must earn +0.0001, so a paired delta below +0.0002 means "
+        "compute cost exceeds measured gain and the bag is dead here too."
+    ),
+    seed_bag=SEED_BAG,
+    incumbent="income_te_tuned",
+    kill_delta=None,
+    kill_value_per_run=SEED_BAG_VALUE_PER_RUN,
+)
+
+
+# --------------------------------------------------------------------------- #
 # The band (ii) experiment queue, in its declared order (#12, PRD #12).
 # --------------------------------------------------------------------------- #
 # Story 62: the queue is run in its declared order, so the candidate with a
@@ -431,6 +487,8 @@ _REGISTRY: dict[str, Experiment] = {
     SEED_BAG_EXPERIMENT.name: SEED_BAG_EXPERIMENT,
     SMOTENC.name: SMOTENC,
     CONSERVATIVE_TUNING.name: CONSERVATIVE_TUNING,
+    INCOME_TE_TUNED.name: INCOME_TE_TUNED,
+    INCOME_TE_TUNED_BAG.name: INCOME_TE_TUNED_BAG,
     **{exp.name: exp for exp in MAX_BIN_EXPERIMENTS},
 }
 
