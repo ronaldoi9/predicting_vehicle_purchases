@@ -30,6 +30,10 @@ _Avoid_: training run, experiment (ambiguous between the two)
 The magnitude below which a difference is unreadable on the instrument in question. Distinct floors exist for the public leaderboard and for a Paired Delta; naming which one is meant is required.
 _Avoid_: error bar, margin, significance
 
+**Axis**:
+A group of candidate configurations sharing one mechanism — Resolution, tuning, representation, a model family. The unit a kill criterion may declare dead, and only by naming how many of its configurations were measured.
+_Avoid_: direction, lever, idea, approach
+
 **CV→LB Offset**:
 The gap between a configuration's OOF AUC and its public leaderboard score. Its *stability over time* is what the public leaderboard is read for; its absolute value ranks nothing.
 _Avoid_: leaderboard correlation, CV/LB gap
@@ -79,6 +83,20 @@ _Avoid_: the formula, the generator, ground truth
 **Residual Positive**:
 A positive-labelled row the Recipe would not have called positive — a row carried over the threshold by its noise draw. Real signal, but a negligible share of pairwise AUC weight.
 _Avoid_: outlier, mislabelled row, hard positive
+
+### Combination
+
+**Arena**:
+The set of Incumbent chains, one per model family, all scored on the Canonical Fold Partition. Families are comparable through their out-of-fold vectors alone, so adding one never resets another's Paired Deltas.
+_Avoid_: model zoo, family sweep, the models
+
+**Member**:
+A Run Record whose out-of-fold vector is eligible to enter a Blend. Membership is a property of the vector, not of the configuration's verdict — a candidate rejected on its own Paired Delta can still be a Member.
+_Avoid_: model, candidate, ensemble component
+
+**Blend**:
+A prediction vector formed by combining Members under weights chosen by a declared protocol, reported as a Paired Delta against its best Member. The weights are part of the configuration, so choosing them on the same rows they are scored on is a leak.
+_Avoid_: ensemble, stack, averaging
 
 ### Representation
 

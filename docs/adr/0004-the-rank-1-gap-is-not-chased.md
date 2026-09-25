@@ -1,5 +1,7 @@
 # The Rank-1 Gap is not chased
 
+> **Amended by [ADR-0005](0005-the-plateau-is-chased-by-breadth.md)**: the finals rule (§2) and the pseudo-labelling kill (§4) are superseded. The Rank-1 Gap itself stays out of scope.
+
 No day of the remaining budget is allocated to the 0.0027 separating rank 1 from the **Plateau**, and the two hypotheses that would have attacked it — pseudo-labelling on the 286,571 unlabelled test rows, and any successor to the structural leak hunt — are killed unrun. The budget goes instead to the *other* 0.0027: the distance between turn 1's expected Incumbent (OOF 0.94372) and the Plateau (CV ~0.9464).
 
 Walking away from the only part of the leaderboard that distinguishes a result looks like giving up, which is why it is recorded here rather than left implicit in a closed issue.
