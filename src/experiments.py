@@ -117,6 +117,14 @@ class Experiment:
     # same pattern as #28's Recipe-margin calibration.
     fitted_margin: bool = False
     fitted_margin_calibrate: bool = False
+    # The linear Frame (#34): turns the Baseline Frame's raw-value layout into
+    # the six-change linear representation behind the Model Adapter (dropped
+    # mod/div income digits, log1p'd counts, income threshold flags, Age and
+    # anxiety one-hot, the saturated gate block, scaling). ``linear_gate``
+    # toggles the gate block alone, so its own contribution is a declared axis
+    # rather than assumed.
+    linear_design: bool = False
+    linear_gate: bool = True
     health_gate: float = 0.9434
     target_oof: float = 0.94167
 
@@ -144,6 +152,8 @@ class Experiment:
             "recipe_margin": self.recipe_margin,
             "fitted_margin": self.fitted_margin,
             "fitted_margin_calibrate": self.fitted_margin_calibrate,
+            "linear_design": self.linear_design,
+            "linear_gate": self.linear_gate,
             "params": dict(self.params),
         }
 
@@ -951,6 +961,91 @@ CATBOOST_ARENA: tuple[Experiment, ...] = (CATBOOST_BASELINE, CATBOOST_ORDERED_TS
 
 
 # --------------------------------------------------------------------------- #
+# The linear model as a fourth Arena family (#34, turn 2). Not a Paired Delta
+# against income_te_tuned on the standing Frame -- #26's resolution found the
+# one verified competitive linear representation needs six simultaneous
+# changes the Baseline Frame cannot express, so this opens its own Incumbent
+# chain on ``adapter.Adapter``'s new ``linear_design`` representation
+# (docs/research/linear-model-representation.md section 5; the six changes are
+# implemented in src/adapter.py, not a new frame spec -- ADR-0001 keeps
+# family-specific representation out of the Frame). incumbent still points at
+# income_te_tuned so a Paired Delta prints for reference, same convention as
+# the XGBoost/CatBoost Arenas; the family's own kill criterion is declared in
+# #34: dead only if all three configs land below OOF 0.9420 (more than 0.0033
+# back -- too far to contribute to a Blend even with decorrelated errors);
+# within 0.0015 of the Incumbent it survives even without winning alone, and
+# the deliverable is then its OOF-vector correlation against the three tree
+# families.
+#
+# Three distinct configurations, same discipline as the other two Arenas:
+# the family's first reproduction number with the gate block in, an ablation
+# with the gate block removed (the one axis #26 named as the binding gap --
+# whether it is doing anything is worth knowing on its own), and a more
+# heavily ridge-penalised fit of the same saturated design (the ~121-column
+# design this ADR amendment licenses needs *a* penalty to be estimable at
+# all; whether it needs a *stronger* one than sklearn's default is a genuine
+# second hypothesis, not a parameter port).
+LINEAR_BASELINE = replace(
+    BASELINE,
+    name="linear_baseline",
+    hypothesis=(
+        "A ridge-penalised logistic regression on the linear Frame (#34) -- "
+        "income kept raw plus its nested cross-fit target encoding and two "
+        "threshold flags, Age and Range_Anxiety_Level one-hot instead of one "
+        "slope each, the saturated Concern x Subsidy x Anxiety gate block, "
+        "log1p'd counts, the mod/div income digits dropped, every continuous "
+        "column scaled -- opens the family's own Arena chain. incumbent points "
+        "at income_te_tuned so a Paired Delta prints, but survival is judged "
+        "on absolute OOF across all three declared configs (#34): dead only "
+        "if all three land below 0.9420."
+    ),
+    model="linear",
+    target_encode=("Annual_Income_USD",),
+    scale=True,
+    linear_design=True,
+    linear_gate=True,
+    params={"C": 1.0, "solver": "lbfgs"},
+    num_boost_round=300,
+    incumbent="income_te_tuned",
+    target_oof=0.94528,
+)
+
+LINEAR_NO_GATE = replace(
+    LINEAR_BASELINE,
+    name="linear_no_gate",
+    hypothesis=(
+        "The same linear Frame with the saturated gate block removed -- "
+        "ADR-0001's fourth consequence forbade hand-engineered interactions "
+        "for trees because a GBDT finds Concern x Subsidy x Anxiety unaided; "
+        "a linear model cannot, so #26 named the gate as 'the binding gap'. "
+        "This ablation asks how much of linear_baseline's OOF the gate block "
+        "is actually carrying, isolated from every other change in the linear "
+        "Frame. Second of the family's three declared configs (#34)."
+    ),
+    linear_gate=False,
+)
+
+LINEAR_STRONG_RIDGE = replace(
+    LINEAR_BASELINE,
+    name="linear_strong_ridge",
+    hypothesis=(
+        "The same linear Frame at ten times sklearn's default ridge strength "
+        "(C=0.1) -- a saturated ~121-column design (45 Age dummies + 3 "
+        "anxiety dummies + 30 gate cells + the remaining continuous/nominal "
+        "columns) needs *a* penalty to be estimable at all (ADR-0001's "
+        "amendment), and whether it needs a *stronger* one than sklearn's "
+        "default is a genuine second hypothesis about this representation, "
+        "not a parameter port from the tree families. Third of the family's "
+        "three declared configs (#34) -- the aggregate kill criterion (all "
+        "three below OOF 0.9420) is judged once this one has run too."
+    ),
+    params={"C": 0.1, "solver": "lbfgs"},
+)
+
+LINEAR_ARENA: tuple[Experiment, ...] = (LINEAR_BASELINE, LINEAR_NO_GATE, LINEAR_STRONG_RIDGE)
+
+
+# --------------------------------------------------------------------------- #
 # The band (ii) experiment queue, in its declared order (#12, PRD #12).
 # --------------------------------------------------------------------------- #
 # Story 62: the queue is run in its declared order, so the candidate with a
@@ -1005,6 +1100,7 @@ _REGISTRY: dict[str, Experiment] = {
     COUNT_ALL13_COMPOSITES.name: COUNT_ALL13_COMPOSITES,
     **{exp.name: exp for exp in XGBOOST_ARENA},
     **{exp.name: exp for exp in CATBOOST_ARENA},
+    **{exp.name: exp for exp in LINEAR_ARENA},
 }
 
 

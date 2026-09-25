@@ -110,6 +110,80 @@ FITTED_MARGIN_INCOME_HALF_WIDTH = 2
 # cheapest-decisive-test question, and belongs to #34 if this axis survives.
 FITTED_MARGIN_RIDGE_C = 1.0
 
+# --------------------------------------------------------------------------- #
+# The linear Frame (#34): a second representation behind the Model Adapter,
+# not a new Baseline Frame spec (docs/research/linear-model-representation.md
+# section 5) -- the Frame stays the raw-value baseline and this module turns
+# it into the six-change design a linear family needs. Reuses #33's gate-code
+# helper (``_gate_code``) for the same saturated interaction ADR-0001 now
+# scopes to tree families only (see the amendment).
+# --------------------------------------------------------------------------- #
+
+# income_mod1000/_mod100 measured AUC 0.50001 on non-floor rows (#4) -- pure
+# Resolution, meaningless to a slope. _div1000 is income rescaled and floored,
+# collinear with raw income. All three are dropped rather than kept "just in
+# case": a redundant near-duplicate column only hurts the design's conditioning.
+LINEAR_MOD_COLUMNS = (
+    f"{RECIPE_INCOME_COLUMN}_mod1000",
+    f"{RECIPE_INCOME_COLUMN}_mod100",
+    f"{RECIPE_INCOME_COLUMN}_div1000",
+)
+
+# Raw integer frequencies have a long tail; a linear term on them asserts a
+# monotone, unit-per-count effect, which is the wrong scale. log1p is the same
+# fix Elefante's published notebook applies to its own count features.
+LINEAR_LOG1P_COLUMNS = (f"{RECIPE_INCOME_COLUMN}_count", "Daily_Commute_km_count")
+
+# The two hard edges in the income distribution (#4's ablation): a GBDT finds
+# these for free with one split each (+0.00002 there); a linear model has no
+# splitter, so they are not redundant with the raw column or its target
+# encoding here.
+LINEAR_INCOME_FLOOR_VALUE = 30000
+LINEAR_INCOME_CEIL_VALUE = 170537
+LINEAR_INCOME_FLOOR_COLUMN = f"{RECIPE_INCOME_COLUMN}_eq_floor"
+LINEAR_INCOME_CEIL_COLUMN = f"{RECIPE_INCOME_COLUMN}_ge_ceil"
+
+# Age's full, contiguous value domain (25..69, 45 values -- confirmed against
+# the training CSV, and the same count the Frame's own build assert protects).
+# Fixed here rather than fitted from a training fold: it is a fact about the
+# data dictionary, not something a fold could leak by observing it.
+LINEAR_AGE_COLUMN = "Age"
+LINEAR_AGE_VALUES: tuple[int, ...] = tuple(range(25, 70))
+
+# The gate's full domain -- concern in {1..5} x subsidy in {0,1} x anxiety in
+# {0,1,2}, 30 cells -- likewise fixed rather than fitted, so every fold's gate
+# design has the same 30 columns even if a rare cell is briefly absent from one
+# outer fold.
+LINEAR_GATE_CODES: tuple[int, ...] = tuple(
+    sorted(c * 6 + s * 3 + a for c in range(1, 6) for s in (0, 1) for a in range(3))
+)
+
+# The continuous columns the linear Frame scales -- Age, the anxiety dummies
+# and the gate block are already 0/1 and need no scaling. A `_te` column per
+# Adapter target encoding is appended by :func:`linear_scale_columns` below,
+# since which columns are target-encoded is a per-Experiment choice.
+LINEAR_SCALE_BASE_COLUMNS = (
+    RECIPE_INCOME_COLUMN,
+    "Daily_Commute_km",
+    "Number_of_Cars_Owned",
+    "Charging_Stations_Near_Home",
+    "Charging_Stations_Near_Work",
+    RECIPE_CONCERN_COLUMN,
+    f"{RECIPE_INCOME_COLUMN}_count",
+    "Daily_Commute_km_count",
+)
+
+
+def linear_scale_columns(target_encode: Sequence[str] = ()) -> tuple[str, ...]:
+    """The linear Frame's scale targets: the base continuous columns plus a
+    ``_te`` column for each column the Adapter target-encodes.
+
+    An L2 penalty is not scale-invariant (ADR-0001's amendment for #34), so
+    every continuous column the linear design carries needs to be on the same
+    footing, not just income.
+    """
+    return LINEAR_SCALE_BASE_COLUMNS + tuple(f"{c}{TE_SUFFIX}" for c in target_encode)
+
 
 def recipe_buy_score(X):
     """The Recipe's raw ``buy_score`` (issue #5), row for row, from a built Frame.
@@ -259,6 +333,8 @@ class Adapter:
         fitted_margin: bool = False,
         fitted_margin_calibrate: bool = False,
         fitted_margin_income_half_width: int = FITTED_MARGIN_INCOME_HALF_WIDTH,
+        linear_design: bool = False,
+        linear_gate: bool = True,
     ) -> None:
         # Plain SMOTE is refused the moment the Adapter is constructed — before
         # any import, so the exclusion holds even where imbalanced-learn is
@@ -286,6 +362,8 @@ class Adapter:
         self.fitted_margin = fitted_margin
         self.fitted_margin_calibrate = fitted_margin_calibrate
         self.fitted_margin_income_half_width = fitted_margin_income_half_width
+        self.linear_design = linear_design
+        self.linear_gate = linear_gate
 
         self.resampled_y = None  # the oversampled training targets, once fitted
         self._fitted = False
@@ -332,6 +410,9 @@ class Adapter:
 
         if self.fitted_margin:
             out = self._fit_fitted_margin(out, y_work)
+
+        if self.linear_design:
+            out = self._apply_linear_design(out)
 
         if self.scale:
             self._fit_scaler(out)
@@ -389,6 +470,8 @@ class Adapter:
             out = self._apply_recipe_margin(out)
         if self.fitted_margin:
             out = self._apply_fitted_margin(out)
+        if self.linear_design:
+            out = self._apply_linear_design(out)
         return self._apply_scale(out)
 
     # ---- target encoding --------------------------------------------------- #
@@ -574,6 +657,54 @@ class Adapter:
         out = X.copy()
         out[FITTED_MARGIN_COLUMN] = margin
         return out
+
+    # ---- the linear Frame (#34) ---------------------------------------------#
+    def _apply_linear_design(self, X):
+        """Turn the Baseline Frame's raw-value layout into the linear design.
+
+        Purely deterministic given ``X`` -- every category domain (Age's 45
+        contiguous values, anxiety's three levels, the gate's 30 cells) is
+        fixed from the data dictionary rather than fitted from data, so this
+        needs no fold-fitted state and reads no ``y``. Order: drop the mod/div
+        income digits, log1p the two count columns, add the two income
+        threshold flags, one-hot Age and Range_Anxiety_Level (a linear model
+        has no splitter, so both need their own column per level rather than
+        one slope), then -- when ``linear_gate`` is set -- the saturated
+        Concern x Subsidy x Anxiety gate block. Scaling runs after this, in
+        the caller, over :func:`linear_scale_columns`.
+        """
+        import numpy as np
+        import pandas as pd
+
+        out = X.drop(columns=[c for c in LINEAR_MOD_COLUMNS if c in X.columns])
+
+        for col in LINEAR_LOG1P_COLUMNS:
+            if col in out.columns:
+                out[col] = np.log1p(out[col].astype("float64"))
+
+        income = out[RECIPE_INCOME_COLUMN]
+        out[LINEAR_INCOME_FLOOR_COLUMN] = (income == LINEAR_INCOME_FLOOR_VALUE).astype("int8")
+        out[LINEAR_INCOME_CEIL_COLUMN] = (income >= LINEAR_INCOME_CEIL_VALUE).astype("int8")
+
+        age_cat = pd.Categorical(out[LINEAR_AGE_COLUMN], categories=LINEAR_AGE_VALUES)
+        age_dummies = pd.get_dummies(age_cat, prefix=LINEAR_AGE_COLUMN).astype("int8")
+        age_dummies.index = out.index
+
+        anxiety_cat = pd.Categorical(out[RECIPE_ANXIETY_COLUMN], categories=(0, 1, 2))
+        anxiety_dummies = pd.get_dummies(anxiety_cat, prefix=RECIPE_ANXIETY_COLUMN).astype("int8")
+        anxiety_dummies.index = out.index
+
+        out = out.drop(columns=[LINEAR_AGE_COLUMN, RECIPE_ANXIETY_COLUMN])
+        parts = [out, age_dummies, anxiety_dummies]
+
+        if self.linear_gate:
+            gate_code = pd.Series(_gate_code(X), index=X.index)
+            gate_cat = pd.Categorical(gate_code, categories=LINEAR_GATE_CODES)
+            gate_dummies = pd.get_dummies(gate_cat, prefix="gate").astype("int8")
+            gate_dummies.index = X.index
+            parts.append(gate_dummies)
+
+        return pd.concat(parts, axis=1)
 
     # ---- scaling ----------------------------------------------------------- #
     def _fit_scaler(self, X):

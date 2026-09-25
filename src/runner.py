@@ -342,12 +342,21 @@ def fold_adapter(config, outer_fold: int, validation_index):
     import frame
 
     oversample = getattr(config, "oversample", None)
+    target_encode = getattr(config, "target_encode", ())
+    linear_design = getattr(config, "linear_design", False)
+    scale_columns = ()
+    if config.scale:
+        scale_columns = (
+            adapter_mod.linear_scale_columns(target_encode)
+            if linear_design
+            else (frame.INCOME_COLUMN,)
+        )
     return adapter_mod.Adapter(
         scale=config.scale,
-        target_encode=getattr(config, "target_encode", ()),
+        target_encode=target_encode,
         outer_fold=outer_fold,
         validation_index=set(validation_index),
-        scale_columns=(frame.INCOME_COLUMN,) if config.scale else (),
+        scale_columns=scale_columns,
         scale_exclude=tuple(name for name, _ in frame.INCOME_DIGIT_TRANSFORMS),
         oversample=oversample,
         oversample_continuous_columns=(
@@ -359,6 +368,8 @@ def fold_adapter(config, outer_fold: int, validation_index):
         recipe_margin=getattr(config, "recipe_margin", False),
         fitted_margin=getattr(config, "fitted_margin", False),
         fitted_margin_calibrate=getattr(config, "fitted_margin_calibrate", False),
+        linear_design=linear_design,
+        linear_gate=getattr(config, "linear_gate", True),
     )
 
 

@@ -1,5 +1,5 @@
-"""Model families behind one signature. Turn 2 adds XGBoost (#24) and CatBoost
-(#25).
+"""Model families behind one signature. Turn 2 adds XGBoost (#24), CatBoost
+(#25) and a linear family (#34).
 
 Comparison Runs use a **fixed round count with early stopping disabled** —
 early stopping on the evaluated fold biases OOF upward and breaks the pairing.
@@ -25,7 +25,8 @@ MIN_MAX_BIN = 64
 # The tree families: a GBDT chooses splits by gain and is invariant to any
 # monotone transform, so scaling is a no-op and stays off (ADR-0001). Any family
 # not listed here is scale-sensitive (linear, SVM, neural net) and the Adapter's
-# scaling hook turns on for it. Turn 1 is LightGBM alone, so scaling never runs.
+# scaling hook turns on for it. ``linear`` (#34) is the first family that
+# actually exercises that switch.
 TREE_FAMILIES = frozenset({"lightgbm", "xgboost", "catboost"})
 
 
@@ -103,8 +104,27 @@ def fit(
         model.fit(pool)
         return model
 
+    if family == "linear":
+        # No max_bin concept -- a linear model has no splitter, so there is
+        # nothing to bind against the 45 Age values here; that invariant is
+        # the Adapter's job for this family (it one-hots Age instead, #34).
+        # ``num_boost_round`` doubles as the solver's max_iter, the same
+        # "how long to fit" knob every other family reads it as.
+        from sklearn.linear_model import LogisticRegression
+
+        # penalty defaults to L2 (ridge); passing it explicitly is deprecated
+        # in sklearn>=1.8 in favour of l1_ratio, so C alone selects the ridge
+        # strength -- same convention adapter.py's fitted-margin fit uses.
+        clf = LogisticRegression(
+            C=float(params.get("C", 1.0)),
+            solver=params.get("solver", "lbfgs"),
+            max_iter=num_boost_round,
+        )
+        clf.fit(X, y)
+        return clf
+
     raise ValueError(
-        f"unknown model family {family!r}; models.fit supports lightgbm, xgboost, catboost"
+        f"unknown model family {family!r}; models.fit supports lightgbm, xgboost, catboost, linear"
     )
 
 
@@ -137,6 +157,8 @@ def predict(model, X, family: str = "lightgbm", cat_features: Sequence[str] = ()
 
         pool = cb.Pool(X, cat_features=list(cat_features) or None)
         return model.predict_proba(pool)[:, 1]
+    if family == "linear":
+        return model.predict_proba(X)[:, 1]
     raise ValueError(
-        f"unknown model family {family!r}; models.predict supports lightgbm, xgboost, catboost"
+        f"unknown model family {family!r}; models.predict supports lightgbm, xgboost, catboost, linear"
     )
