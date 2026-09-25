@@ -148,8 +148,26 @@ class Experiment:
     pseudo_label: bool = False
     pseudo_label_threshold: float | None = None
     pseudo_label_weight: float | None = None
+    # An Arena family's Member gate (ADR-0006 §3, #40), declared before it
+    # runs: its vector is an eligible Member if its OOF AUC is at least
+    # ``member_gate_oof`` or its OOF correlation with the Incumbent is below
+    # ``member_gate_corr``. Not a promotion rule -- the family is its own
+    # chain -- so it replaces a kill criterion rather than feeding the verdict.
+    # Like the kill criterion, it lands on the Run Record, not the config.
+    member_gate_oof: float | None = None
+    member_gate_corr: float | None = None
     health_gate: float = 0.9434
     target_oof: float = 0.94167
+
+    def __post_init__(self) -> None:
+        # The gate's two arms are one criterion, and it is the declared
+        # criterion: it cannot sit beside a kill threshold it would replace.
+        if (self.member_gate_oof is None) != (self.member_gate_corr is None):
+            raise ValueError(f"{self.name}: a Member gate declares both its OOF and its correlation arm")
+        if self.member_gate_oof is not None and (
+            self.kill_delta is not None or self.kill_min_folds_positive is not None
+        ):
+            raise ValueError(f"{self.name}: a Member gate replaces the kill criterion; declare one, not both")
 
     def seeds(self) -> dict[str, int]:
         return {k: self.params[k] for k in SEED_KEYS if k in self.params}
@@ -1258,6 +1276,48 @@ HEULJAX_TRACER = replace(
 )
 
 
+# heuljax completed to the notebook's 173 features (#40, ADR-0006 §3): the
+# tracer's protocol unchanged -- Canonical Fold Partition, 1000 fixed rounds,
+# CPU hist, the same booster params and inner donor seed -- with the other
+# ~150 donor-fitted columns and the ridge-Newton GAM as base_margin added
+# (src/heuljax.py, the "full" feature set). Every group, the GAM included, is
+# fitted inside the outer training rows by the inner 5-fold donor split. The
+# income-group XGBRegressor's seeds come from group_seed (the notebook's
+# 7000 + inner fold, at its fold 0).
+#
+# The gate is declared before the run and is not a promotion: this is its own
+# Arena chain, not a Paired Delta against the Frame. Passing it makes the
+# vector an eligible Member for the turn-3 Blend.
+# --------------------------------------------------------------------------- #
+HEULJAX_FULL = replace(
+    HEULJAX_TRACER,
+    name="heuljax_full",
+    hypothesis=(
+        "heuljax's kps6e09-xgb-sample pipeline, completed to its 173 features "
+        "(raw 13, 4 original-data income priors, 7 exact TEs, 38 neighbour and "
+        "hierarchical rates, 9 income-group model priors, 28 latent means per "
+        "income value, 10 single digits, 2 worry-key TEs, 18 gate mixtures, 12 "
+        "composition columns, 4 ridge-Newton GAM coordinates, 28 multi-scale "
+        "TEs) with the GAM as base_margin and +1 monotone on its 78 rate "
+        "columns, every donor state fitted inside the outer training rows by "
+        "the inner 5-fold split, yields an out-of-fold vector on the Canonical "
+        "Fold Partition at 1000 fixed rounds on CPU hist that is an eligible "
+        "Member. Gate, declared before running: OOF >= 0.9455, or OOF "
+        "correlation < 0.985 with the Incumbent te_keys_prior5. Not a "
+        "promotion: its own Arena chain."
+    ),
+    params={**HEULJAX_XGB_PARAMS, "feature_set": "full", "group_seed": 7000},
+    # The Incumbent at the time of declaring, promoted after the tracer ran
+    # (#39); the gate's correlation arm reads its vector on each fold seed.
+    incumbent="te_keys_prior5",
+    member_gate_oof=0.9455,
+    member_gate_corr=0.985,
+    # The notebook's pooled 0.946309 is 10-fold and early-stopped on the scored
+    # fold; ~0.00016 of it is protocol (research note §2.4).
+    target_oof=0.9461,
+)
+
+
 # --------------------------------------------------------------------------- #
 # The stacked income/commute TE (#39, ADR-0006 §1): Maldonado's multi-key
 # target encoding, measured as one stacked candidate against the turn-3
@@ -1382,6 +1442,7 @@ _REGISTRY: dict[str, Experiment] = {
     **{exp.name: exp for exp in LINEAR_ARENA},
     **{exp.name: exp for exp in PSEUDO_LABEL_ARENA},
     HEULJAX_TRACER.name: HEULJAX_TRACER,
+    HEULJAX_FULL.name: HEULJAX_FULL,
     **{exp.name: exp for exp in TE_KEYS_AXIS},
 }
 

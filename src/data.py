@@ -33,6 +33,10 @@ def _repo_root() -> Path:
 DATA_DIR = _repo_root() / "data"
 TRAIN_CSV = DATA_DIR / "train.csv"
 TEST_CSV = DATA_DIR / "test.csv"
+# The 10,000-row original the competition was generated from (Kaggle dataset
+# itzzomkar/ev-adoption-behavior-and-range-anxiety), read by heuljax's
+# original-data income priors only (#40).
+ORIGINAL_CSV = DATA_DIR / "EV_Adoption_and_Range_Anxiety_Dataset.csv"
 
 # sha256 of the canonical fold-id vector (int8, row order) for FOLD_SEED. The
 # data/ directory is gitignored and absent in the agent environment, so this is
@@ -92,6 +96,22 @@ def load_train():
 def load_test():
     """Read ``test.csv`` in file order, asserting zero missing values."""
     return _load_csv(TEST_CSV)
+
+
+def load_original():
+    """Read the original dataset as shipped: Yes/No target, missing values kept.
+
+    Unlike train and test it does carry missing values (income, commute,
+    concern), and its consumer skips them rather than imputing.
+    """
+    import pandas as pd
+
+    if not ORIGINAL_CSV.exists():
+        raise FileNotFoundError(
+            f"{ORIGINAL_CSV} is missing. Provision it with: kaggle datasets download "
+            "itzzomkar/ev-adoption-behavior-and-range-anxiety -p data/ --unzip"
+        )
+    return pd.read_csv(ORIGINAL_CSV)
 
 
 def fold_ids_for(y, seed: int = FOLD_SEED):
@@ -165,6 +185,7 @@ __all__ = [
     "CANONICAL_FOLD_SHA256",
     "load_train",
     "load_test",
+    "load_original",
     "fold_ids",
     "fold_ids_for",
     "sha256_of_folds",

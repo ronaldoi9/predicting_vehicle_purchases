@@ -201,6 +201,31 @@ def tuning_kill_outcome(
     }
 
 
+def member_gate_outcome(
+    oof_auc: float, incumbent_oof_corr: float | None, *, min_oof: float, max_corr: float
+) -> dict[str, Any]:
+    """Apply an Arena family's declared Member gate (ADR-0006 §3, #40).
+
+    The vector is an eligible Member if its OOF AUC reaches ``min_oof`` *or*
+    its OOF correlation with the Incumbent is below ``max_corr``. Without the
+    Incumbent's vector only the OOF arm can be read. Recorded in the Run
+    Record's ``kill_criterion`` slot either way; ``dead`` is its negation, so
+    the ledger reads it like every other declared criterion.
+    """
+    by_oof = float(oof_auc) >= float(min_oof)
+    by_corr = incumbent_oof_corr is not None and float(incumbent_oof_corr) < float(max_corr)
+    passed = by_oof or by_corr
+    return {
+        "member_gate": True,
+        "min_oof": float(min_oof),
+        "max_corr": float(max_corr),
+        "oof_auc": float(oof_auc),
+        "incumbent_oof_corr": float(incumbent_oof_corr) if incumbent_oof_corr is not None else None,
+        "passed": passed,
+        "dead": not passed,
+    }
+
+
 def config_hash(config: Mapping[str, Any]) -> str:
     """sha256 of the config's canonical JSON, so "have I tried this?" is a grep.
 
@@ -624,6 +649,16 @@ def run(config) -> dict[str, Any]:
                     folds_positive, config.kill_min_folds_positive
                 )
 
+    # An Arena family's Member gate is its declared criterion instead of a
+    # kill threshold on the Paired Delta (ADR-0006 §3).
+    if getattr(config, "member_gate_oof", None) is not None:
+        kill = member_gate_outcome(
+            oof_auc,
+            incumbent_oof_corr,
+            min_oof=config.member_gate_oof,
+            max_corr=config.member_gate_corr,
+        )
+
     rid = run_id(config.name, when=when)
     oof_path = RUNS_DIR / rid / "oof.npy"
     oof_path.parent.mkdir(parents=True, exist_ok=True)
@@ -685,6 +720,7 @@ def confirm(config) -> dict[str, Any]:
     incumbent_name = getattr(config, "incumbent", None)
     per_seed: dict[int, float] = {}
     per_seed_delta: dict[int, float] = {}
+    per_seed_gate: dict[int, bool] = {}
     for seed in verdict.CONFIRMATION_SEEDS:
         if incumbent_name and _latest_run_for(incumbent_name, seed) is None:
             # Arm the pairing on this seed before the candidate runs on it.
@@ -693,6 +729,8 @@ def confirm(config) -> dict[str, Any]:
         per_seed[seed] = record["oof_auc"]
         if record.get("paired_delta") is not None:
             per_seed_delta[seed] = float(record["paired_delta"])
+        if (record.get("kill_criterion") or {}).get("member_gate"):
+            per_seed_gate[seed] = bool(record["kill_criterion"]["passed"])
 
     summary = confirmation_summary(per_seed)
     print(
@@ -704,6 +742,16 @@ def confirm(config) -> dict[str, Any]:
         + ")."
     )
 
+    if per_seed_gate:
+        # A Member's Confirmation Run reads its gate on every seed; the
+        # paired-delta sign below is a reference, as on the canonical seed.
+        summary["member_gate_passed"] = [per_seed_gate[s] for s in sorted(per_seed_gate)]
+        held = all(per_seed_gate.values()) and len(per_seed_gate) == len(verdict.CONFIRMATION_SEEDS)
+        print(
+            f"MEMBER GATE {'HELD' if held else 'DID NOT HOLD'} across seeds — "
+            + ", ".join(f"{s}:{'pass' if p else 'fail'}" for s, p in sorted(per_seed_gate.items()))
+            + "."
+        )
     if incumbent_name:
         seeds = tuple(verdict.CONFIRMATION_SEEDS)
         if len(per_seed_delta) != len(seeds):
@@ -754,14 +802,21 @@ def _print_verdict(config, record: Mapping[str, Any]) -> None:
             + ", ".join(f"{a:.5f}" for a in record["fold_aucs"])
         )
     _print_kill_criterion(record)
+    if (record.get("kill_criterion") or {}).get("member_gate"):
+        # Its own Arena chain: the Paired Delta is a reference, not a verdict.
+        print(
+            "No promotion verdict: a Member gate is not a promotion; the "
+            "Paired Delta above is a reference against the Incumbent."
+        )
+        return
     print_promotion_verdict(record)
 
 
 def _print_kill_criterion(record: Mapping[str, Any]) -> None:
     """Print the declared kill-criterion outcome, if the candidate had one.
 
-    Four shapes, distinguished by the keys their outcome carries:
-    the seed bag's cost-versus-gain break-even (``required_gain``), conservative
+    Five shapes, distinguished by the keys their outcome carries: an Arena
+    family's Member gate (``member_gate``), the seed bag's cost-versus-gain break-even (``required_gain``), conservative
     tuning's time-boxed threshold (``time_budget_s``), the Resolution sweep's
     folds-positive rule (``min_folds_positive`` — a value must beat the Incumbent
     in at least that many of ``n_folds`` folds, else the axis freezes), and the
@@ -771,6 +826,16 @@ def _print_kill_criterion(record: Mapping[str, Any]) -> None:
     if not kill:
         return
     delta = record.get("paired_delta")
+    if kill.get("member_gate"):
+        corr = kill["incumbent_oof_corr"]
+        shown = f"{corr:.5f}" if corr is not None else "n/a (no Incumbent vector)"
+        print(
+            f"MEMBER GATE: {'PASSED' if kill['passed'] else 'FAILED'} — OOF "
+            f"{kill['oof_auc']:.5f} (needs >= {kill['min_oof']:.4f}) or correlation "
+            f"{shown} with the Incumbent (needs < {kill['max_corr']:.3f}); "
+            + ("an eligible Member for the Blend." if kill["passed"] else "not a Member.")
+        )
+        return
     if "required_gain" in kill:
         # The seed bag's cost-versus-gain kill.
         req = kill["required_gain"]

@@ -206,7 +206,8 @@ def test_a_training_row_never_counts_towards_its_own_encoding() -> None:
     X = df.drop(columns=["id", "Will_Buy_EV"])
     y = df["Will_Buy_EV"].to_numpy()
 
-    features = heuljax.donor_features(X, y, seed=0)
+    features, margin = heuljax.donor_features(X, y, seed=0)
+    assert margin is None  # the tracer slice boosts from base_score, not the GAM
     support = features[:, heuljax.FEATURE_COLUMNS.index("SUPPORT_INC_LOG")]
     assert support[7] == 0.0
     assert features.shape == (400, len(heuljax.FEATURE_COLUMNS))
