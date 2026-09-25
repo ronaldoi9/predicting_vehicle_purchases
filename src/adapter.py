@@ -51,21 +51,25 @@ TE_SUFFIX = "_te"
 # exact value. Computed from the original, unscaled values -- the ordering
 # ADR-0001 fixes for income digits -- which holds here because scaling is the
 # last step of ``fit_transform``/``transform``, after every encoding.
-TE_DERIVATIONS = ("div100", "div1000", "floor")
+TE_DERIVATIONS = {
+    "div100": lambda v: v // 100,
+    "div1000": lambda v: v // 1000,
+    "floor": lambda v: v // 1,  # floor for a float, identity for an integer
+}
+
+
+def _assert_known_derivation(derivation: str) -> None:
+    assert derivation in TE_DERIVATIONS, (
+        f"unknown TE key derivation {derivation!r}; known: {tuple(TE_DERIVATIONS)}"
+    )
 
 
 def derive_key(values, derivation: str):
     """The derived key of each value: ``//100``, ``//1000`` or ``floor``."""
     import numpy as np
 
-    values = np.asarray(values)
-    if derivation == "div100":
-        return values // 100
-    if derivation == "div1000":
-        return values // 1000
-    if derivation == "floor":
-        return np.floor(values)
-    raise ValueError(f"unknown TE key derivation {derivation!r}; known: {TE_DERIVATIONS}")
+    _assert_known_derivation(derivation)
+    return TE_DERIVATIONS[derivation](np.asarray(values))
 
 
 def derived_te_column(source: str, derivation: str) -> str:
@@ -374,9 +378,7 @@ class Adapter:
             f"Resolution — use SMOTENC. Got {oversample!r}."
         )
         for _, derivation in derived_keys:
-            assert derivation in TE_DERIVATIONS, (
-                f"unknown TE key derivation {derivation!r}; known: {TE_DERIVATIONS}"
-            )
+            _assert_known_derivation(derivation)
         self.scale = scale
         self.target_encode = tuple(target_encode)
         self.derived_keys = tuple((str(src), str(d)) for src, d in derived_keys)
