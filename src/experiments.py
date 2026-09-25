@@ -1170,6 +1170,80 @@ PSEUDO_LABEL_ARENA: tuple[Experiment, ...] = (PSEUDO_LABEL_THRESHOLD, PSEUDO_LAB
 
 
 # --------------------------------------------------------------------------- #
+# heuljax's kps6e09-xgb-sample pipeline as an Arena family (#37, turn 3;
+# ADR-0006 §3). The first family that takes the raw columns (the
+# ``raw_columns`` Frame spec) and builds its own representation inside each
+# outer fold (src/heuljax.py). This tracer bullet carries the 13 raw columns
+# and the notebook's 7 exact-value target encodings only, on the Canonical
+# Fold Partition, at 1000 fixed rounds (mid-plateau of the notebook's own AUC
+# curves) instead of early stopping on the scored fold, on CPU ``hist``. Its
+# job is to check the 20-35 min/run estimate before the full port is
+# committed to, and to put a first out-of-fold vector on our rows.
+#
+# incumbent points at hpsearch_lightgbm_best_confirm -- the turn-3 Incumbent
+# (ADR-0006 §4) -- so the Run Record carries the OOF correlation the family's
+# gate reads and a reference Paired Delta. The family's gate is declared in
+# ADR-0006 §3 and judged on the full port, not this slice: OOF >= 0.9455 or
+# OOF correlation < 0.985 with the Incumbent.
+# --------------------------------------------------------------------------- #
+HEULJAX_XGB_PARAMS: dict[str, Any] = {
+    "objective": "binary:logistic",
+    "eval_metric": "auc",
+    "base_score": 0.5,
+    "tree_method": "hist",
+    "device": "cpu",
+    "learning_rate": 0.015,
+    "max_depth": 5,
+    "max_bin": 256,
+    "colsample_bynode": 0.8,
+    "colsample_bytree": 1.0,
+    "subsample": 1.0,
+    "min_child_weight": 1.0,
+    "reg_alpha": 10.0,
+    "reg_lambda": 15.0,
+    "nthread": 10,
+    "seed": 0,
+    "verbosity": 0,
+    # The inner donor split's random_state, held across outer folds (the
+    # notebook's 42 + 3000 + fold, at its fold 0) -- models.fit is not told
+    # which outer fold it is fitting.
+    "donor_seed": 3042,
+}
+
+HEULJAX_TRACER = replace(
+    BASELINE,
+    name="heuljax_tracer",
+    hypothesis=(
+        "heuljax's pipeline, cut to the 13 raw columns plus its 7 exact-value "
+        "target encodings (income at priors 5/20/50, commute at 20/100, and "
+        "both supports), each fitted by its inner 5-fold donor split inside "
+        "the outer training rows only, runs as its own Arena family on the "
+        "Canonical Fold Partition: XGBoost at lr 0.015, depth 5, 256 bins, "
+        "hist on CPU, +1 monotone on the rate columns, 1000 fixed rounds and "
+        "no early stopping on the scored fold. A tracer bullet: it reports "
+        "OOF AUC, OOF correlation with hpsearch_lightgbm_best_confirm and the "
+        "wall-clock time per fold, the last checking the 20-35 min/run "
+        "estimate before the full port. No kill criterion on this slice; the "
+        "family's gate (ADR-0006 §3: OOF >= 0.9455 or correlation < 0.985) is "
+        "judged on the full port."
+    ),
+    frame="raw_columns",
+    model="heuljax",
+    params=HEULJAX_XGB_PARAMS,
+    num_boost_round=1000,
+    incumbent="hpsearch_lightgbm_best_confirm",
+    # No Baseline Frame is assembled, so its 0.9434 gate does not apply. The
+    # raw-13 reproduction (0.94167) is what this family's raw columns must at
+    # least reproduce if the partition and read order are right -- a build
+    # check, not a score target.
+    health_gate=0.94167,
+    # Maldonado's raw 13 + exact income/commute TE at prior 20 (self-report,
+    # docs/research/income-te-keys-and-published-pipelines.md §1.5).
+    target_oof=0.94484,
+)
+
+
+# --------------------------------------------------------------------------- #
 # The band (ii) experiment queue, in its declared order (#12, PRD #12).
 # --------------------------------------------------------------------------- #
 # Story 62: the queue is run in its declared order, so the candidate with a
@@ -1227,6 +1301,7 @@ _REGISTRY: dict[str, Experiment] = {
     **{exp.name: exp for exp in CATBOOST_ARENA},
     **{exp.name: exp for exp in LINEAR_ARENA},
     **{exp.name: exp for exp in PSEUDO_LABEL_ARENA},
+    HEULJAX_TRACER.name: HEULJAX_TRACER,
 }
 
 

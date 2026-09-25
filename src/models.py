@@ -1,5 +1,6 @@
 """Model families behind one signature. Turn 2 adds XGBoost (#24), CatBoost
-(#25) and a linear family (#34).
+(#25) and a linear family (#34); turn 3 adds heuljax's pipeline (#37), the
+first family that takes the raw columns and builds its own representation.
 
 Comparison Runs use a **fixed round count with early stopping disabled** —
 early stopping on the evaluated fold biases OOF upward and breaks the pairing.
@@ -26,8 +27,8 @@ MIN_MAX_BIN = 64
 # monotone transform, so scaling is a no-op and stays off (ADR-0001). Any family
 # not listed here is scale-sensitive (linear, SVM, neural net) and the Adapter's
 # scaling hook turns on for it. ``linear`` (#34) is the first family that
-# actually exercises that switch.
-TREE_FAMILIES = frozenset({"lightgbm", "xgboost", "catboost"})
+# actually exercises that switch. ``heuljax`` (#37) is XGBoost underneath.
+TREE_FAMILIES = frozenset({"lightgbm", "xgboost", "catboost", "heuljax"})
 
 
 def needs_scaling(family: str) -> bool:
@@ -132,8 +133,16 @@ def fit(
         clf.fit(X, y)
         return clf
 
+    if family == "heuljax":
+        # X is the raw columns (the ``raw_columns`` Frame spec); the family
+        # builds its donor-state features inside this call, on these rows only.
+        import heuljax
+
+        _assert_max_bin(params.get("max_bin", 256))
+        return heuljax.fit(X, y, params, num_boost_round=num_boost_round)
+
     raise ValueError(
-        f"unknown model family {family!r}; models.fit supports lightgbm, xgboost, catboost, linear"
+        f"unknown model family {family!r}; models.fit supports lightgbm, xgboost, catboost, linear, heuljax"
     )
 
 
@@ -168,6 +177,10 @@ def predict(model, X, family: str = "lightgbm", cat_features: Sequence[str] = ()
         return model.predict_proba(pool)[:, 1]
     if family == "linear":
         return model.predict_proba(X)[:, 1]
+    if family == "heuljax":
+        import heuljax
+
+        return heuljax.predict(model, X)
     raise ValueError(
-        f"unknown model family {family!r}; models.predict supports lightgbm, xgboost, catboost, linear"
+        f"unknown model family {family!r}; models.predict supports lightgbm, xgboost, catboost, linear, heuljax"
     )

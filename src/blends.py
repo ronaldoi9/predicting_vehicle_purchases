@@ -25,7 +25,11 @@ from blend import BlendConfig
 # same sense the queue's candidates were; ``count_all13_composites`` is #29's
 # stacked follow-up, explicitly gated behind both of its parents landing
 # individually — they did not, so it was never run and stays unrun.
-_EXCLUDED_FROM_ALL_MEMBERS = frozenset({"tracer_raw13", "count_all13_composites"})
+# ``heuljax_tracer`` (#37) is a tracer bullet for a family whose full port is
+# still to come; turn 3's Blend (T3) declares its own Members instead.
+_EXCLUDED_FROM_ALL_MEMBERS = frozenset(
+    {"tracer_raw13", "count_all13_composites", "heuljax_tracer"}
+)
 
 BLEND_ALL_MEMBERS = BlendConfig(
     name="blend_all_members",

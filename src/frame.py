@@ -41,6 +41,13 @@ hypothesis #27 measured negative and this project had not run itself:
   via the Model Adapter's existing ``target_encode`` field, so no Adapter
   change is needed to test a composite-key target encoding.
 
+One spec is not a Frame at all: ``raw_columns`` (#37) hands a family that
+builds its own representation inside the fold (heuljax, ADR-0006 §3) the 13 raw
+columns exactly as read -- ``id`` and the target dropped, nothing encoded --
+so that family's representation stays its own and the Baseline Frame is
+untouched (ADR-0001). It returns before any Frame assembly, so every other
+spec is built exactly as before.
+
 Categorical columns are selected from the committed :mod:`columns` lists, never
 by dtype. Two guards live on the execution path and read as bug reports, not
 score verdicts: ``Age`` must keep all 45 distinct values individually
@@ -162,6 +169,10 @@ DIGIT7_COLUMNS: tuple[str, ...] = (
     _CONCERN_COLUMN,
 )
 
+# The spec that bypasses the Frame for a family that builds its own
+# representation from the raw columns (#37).
+RAW_COLUMNS_SPEC = "raw_columns"
+
 # The frame specs this builder knows. ``raw13`` and ``baseline`` are frozen;
 # the rest are #29's additive frequency/digit/composite-key candidates, each
 # built strictly on top of ``baseline``.
@@ -174,6 +185,7 @@ FRAME_SPECS = (
     "count_all13_composites",
     "digits7",
     "composite_te_keys",
+    RAW_COLUMNS_SPEC,
 )
 
 
@@ -198,7 +210,7 @@ def extra_columns(spec: str) -> list[str]:
     extras plus whatever that spec's own docstring (module-level) says it adds.
     """
     _require_known_spec(spec)
-    if spec == "raw13":
+    if spec in ("raw13", RAW_COLUMNS_SPEC):
         return []
     base = _baseline_extra_columns()
     if spec == "baseline":
@@ -326,6 +338,25 @@ def _digit7(combined):
     return pd.DataFrame(out, index=combined.index)
 
 
+def _raw_columns(train, test):
+    """The 13 raw columns of train and test, untouched, in file order.
+
+    Asserted to be exactly the committed schema, in the same order in both
+    files, so a family reading them by name cannot silently miss one.
+    """
+    expected = sorted(ALL_RAW_COLUMNS)
+    X_train = _drop_id_and_target(train).reset_index(drop=True)
+    X_test = _drop_id_and_target(test).reset_index(drop=True)
+    for name, part in (("train", X_train), ("test", X_test)):
+        if sorted(part.columns) != expected:
+            raise AssertionError(
+                f"{name} raw columns {sorted(part.columns)} != the committed schema {expected}"
+            )
+    if list(X_train.columns) != list(X_test.columns):
+        raise AssertionError("raw column order differs between train and test")
+    return X_train, X_test
+
+
 def build_frame(train, test, spec: str = "baseline"):
     """Assemble the Baseline Frame from train and test.
 
@@ -340,6 +371,8 @@ def build_frame(train, test, spec: str = "baseline"):
     import pandas as pd
 
     _require_known_spec(spec)
+    if spec == RAW_COLUMNS_SPEC:
+        return _raw_columns(train, test)
 
     n_train = len(train)
 

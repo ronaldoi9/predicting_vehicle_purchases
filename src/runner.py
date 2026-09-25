@@ -113,6 +113,22 @@ def confirmation_summary(per_seed_oof_auc: Mapping[int, float]) -> dict[str, Any
     }
 
 
+def oof_correlation(a: Sequence[float], b: Sequence[float]) -> float:
+    """Pearson correlation between two OOF vectors on the same rows.
+
+    How far a Member's errors move with another's -- the quantity an Arena
+    family's gate reads against the Incumbent (ADR-0006 §3). Both vectors must
+    come from the same fold seed, so row ``i`` is the same training row in each.
+    """
+    import numpy as np
+
+    a = np.asarray(a, dtype=np.float64)
+    b = np.asarray(b, dtype=np.float64)
+    if a.shape != b.shape:
+        raise ValueError(f"OOF vectors must align row for row: {a.shape} vs {b.shape}")
+    return float(np.corrcoef(a, b)[0, 1])
+
+
 def kill_criterion_outcome(mean_delta: float, kill_delta: float) -> dict[str, Any]:
     """Apply a candidate's declared kill criterion to its mean Paired Delta.
 
@@ -238,6 +254,8 @@ def build_run_record(
     folds_positive: int | None = None,
     fold_deltas: Sequence[float] | None = None,
     kill_criterion: Mapping[str, Any] | None = None,
+    fold_wall_times: Sequence[float] | None = None,
+    incumbent_oof_corr: float | None = None,
 ) -> dict[str, Any]:
     """Assemble one Run Record — the unit the next CRISP turn reads.
 
@@ -245,6 +263,8 @@ def build_run_record(
     dirty-tree flag, the full config, the five fold AUCs, the OOF AUC, the
     fold-partition sha256, the seeds, wall time and the OOF vector path. The
     Paired-Delta fields are present but null on the first run (no Incumbent yet).
+    #37 adds the wall-clock time of each fold and the OOF correlation with the
+    Incumbent's vector, null when there is no Incumbent run to read.
     """
     when = when or datetime.now(timezone.utc)
     git_info = dict(git_info or git_capture())
@@ -268,6 +288,10 @@ def build_run_record(
         "folds_positive": folds_positive,
         "fold_deltas": [float(d) for d in fold_deltas] if fold_deltas is not None else None,
         "kill_criterion": dict(kill_criterion) if kill_criterion is not None else None,
+        "fold_wall_times": (
+            [float(t) for t in fold_wall_times] if fold_wall_times is not None else None
+        ),
+        "incumbent_oof_corr": float(incumbent_oof_corr) if incumbent_oof_corr is not None else None,
     }
 
 
@@ -522,7 +546,9 @@ def run(config) -> dict[str, Any]:
 
     oof = np.zeros(len(y), dtype=np.float64)
     fold_aucs: list[float] = []
+    fold_wall_times: list[float] = []
     for k in range(data.N_FOLDS):
+        t_fold = time.perf_counter()
         tr_idx = np.where(fold != k)[0]
         va_idx = np.where(fold == k)[0]
 
@@ -548,6 +574,8 @@ def run(config) -> dict[str, Any]:
             preds = fold_predict(config, X_tr, y_fit, X_va)
         oof[va_idx] = preds
         fold_aucs.append(float(roc_auc_score(y[va_idx], preds)))
+        fold_wall_times.append(time.perf_counter() - t_fold)
+        print(f"fold {k}: AUC {fold_aucs[-1]:.5f} in {fold_wall_times[-1]:.1f}s", flush=True)
 
     oof_auc = float(roc_auc_score(y, oof))
 
@@ -555,6 +583,7 @@ def run(config) -> dict[str, Any]:
     # per-fold on the shared Canonical Fold Partition — and its declared kill
     # criterion is applied to the result. Recorded either way.
     incumbent_run_id = paired_delta = folds_positive = deltas = kill = None
+    incumbent_oof_corr = None
     incumbent_name = getattr(config, "incumbent", None)
     if incumbent_name:
         inc = _latest_run_for(incumbent_name, config.fold_seed)
@@ -568,6 +597,11 @@ def run(config) -> dict[str, Any]:
             deltas = fold_deltas(fold_aucs, inc["fold_aucs"])
             paired_delta, folds_positive = paired_delta_summary(deltas)
             incumbent_run_id = inc["run_id"]
+            inc_oof_path = _repo_root() / inc["oof_path"]
+            if inc_oof_path.exists():
+                incumbent_oof_corr = oof_correlation(oof, np.load(inc_oof_path))
+            else:
+                print(f"NOTE: incumbent OOF vector {inc['oof_path']} is missing; no correlation recorded.")
             elapsed = time.perf_counter() - t0
             if getattr(config, "kill_time_budget_s", None) is not None:
                 # Conservative tuning: 2h without +kill_delta -> dead (blowing the
@@ -608,6 +642,8 @@ def run(config) -> dict[str, Any]:
         folds_positive=folds_positive,
         fold_deltas=deltas,
         kill_criterion=kill,
+        fold_wall_times=fold_wall_times,
+        incumbent_oof_corr=incumbent_oof_corr,
     )
     # Keep the id and the recorded oof path consistent with the vector on disk.
     record["run_id"] = rid
@@ -698,6 +734,12 @@ def _print_verdict(config, record: Mapping[str, Any]) -> None:
     gate = config.health_gate
     print(f"[{record['run_id']}] OOF AUC = {oof_auc:.5f}  (fold AUCs: "
           + ", ".join(f"{a:.5f}" for a in record["fold_aucs"]) + ")")
+    if record.get("fold_wall_times"):
+        times = record["fold_wall_times"]
+        print("Wall time per fold: " + ", ".join(f"{t:.1f}s" for t in times)
+              + f" (mean {sum(times) / len(times):.1f}s)")
+    if record.get("incumbent_oof_corr") is not None:
+        print(f"OOF correlation with the Incumbent: {record['incumbent_oof_corr']:.5f}")
     if oof_auc >= gate:
         print(f"Health Gate PASSED (>= {gate:.4f}); target {config.target_oof:.5f}.")
     else:
