@@ -36,6 +36,7 @@ render-ledger = "render:main"        # render the ledger as a Markdown table
 submit = "submission:main"           # fit the mean of the five folds and submit
 record-score = "submission:record_score"  # fill in a submission's public score
 select-finals = "finals:main"        # select the two finals (best CV + Floor) and close the turn
+run-blend = "blend:main"             # combine a declared Blend's Members and record it
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -59,6 +60,8 @@ py-modules = [
     "promote",
     "render",
     "finals",
+    "blend",
+    "blends",
 ]
 
 [tool.pytest.ini_options]
