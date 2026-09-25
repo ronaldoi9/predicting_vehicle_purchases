@@ -490,6 +490,52 @@ INCOME_TE_TUNED_BAG = replace(
 
 
 # --------------------------------------------------------------------------- #
+# #30's hyperparameter-search winner for LightGBM, registered so its already-
+# confirmed run (#32's offset check) can be resolved and submitted. The exact
+# params/num_boost_round of the winning trial from
+# runs/hp_search/lightgbm.json, frozen here rather than re-read at import time
+# — matching what scripts/confirm_hp_search_winner.py built and what the
+# Confirmation Run on seeds 0/1/2 already measured (+0.00029/+0.00036/+0.00029).
+# --------------------------------------------------------------------------- #
+HPSEARCH_LIGHTGBM_BEST_CONFIRM = replace(
+    INCOME_TE_TUNED,
+    name="hpsearch_lightgbm_best_confirm",
+    hypothesis=(
+        "The random-search winner from #30 (fewer/shallower leaves, "
+        "learning_rate~=0.015, num_boost_round=2341, bagging_freq=1 activating "
+        "bagging) still holds sign on a real Confirmation Run. Confirmed: mean "
+        "paired delta +0.00031 across seeds 0/1/2, sign positive on all three, "
+        "one seed clearing the +0.0003 bar outright."
+    ),
+    params={
+        "objective": "binary",
+        "learning_rate": 0.014951112774985127,
+        "num_leaves": 96,
+        "max_bin": 511,
+        "feature_fraction": 0.6049774031857386,
+        "bagging_fraction": 0.7439283282620738,
+        "bagging_freq": 1,
+        "num_threads": 10,
+        "deterministic": True,
+        "force_row_wise": True,
+        "seed": 0,
+        "bagging_seed": 0,
+        "feature_fraction_seed": 0,
+        "data_random_seed": 0,
+        "verbosity": -1,
+        "max_depth": 4,
+        "min_child_samples": 273,
+        "min_split_gain": 0.07609624449125757,
+        "lambda_l1": 2.361226217880583,
+        "lambda_l2": 1.8980761166186388,
+    },
+    num_boost_round=2341,
+    incumbent="income_te_tuned",
+    kill_delta=None,
+)
+
+
+# --------------------------------------------------------------------------- #
 # The init_score contradiction (#28): -0.0029 measured pre-pipeline (research,
 # docs/research/generator-recipe.md, branch research/generator-recipe) against
 # +0.00005 published in two libraries. The pre-pipeline number used an assumed
@@ -1170,6 +1216,7 @@ _REGISTRY: dict[str, Experiment] = {
     CONSERVATIVE_TUNING.name: CONSERVATIVE_TUNING,
     INCOME_TE_TUNED.name: INCOME_TE_TUNED,
     INCOME_TE_TUNED_BAG.name: INCOME_TE_TUNED_BAG,
+    HPSEARCH_LIGHTGBM_BEST_CONFIRM.name: HPSEARCH_LIGHTGBM_BEST_CONFIRM,
     RECIPE_MARGIN_CALIBRATED.name: RECIPE_MARGIN_CALIBRATED,
     FITTED_MARGIN_RAW.name: FITTED_MARGIN_RAW,
     FITTED_MARGIN_CALIBRATED.name: FITTED_MARGIN_CALIBRATED,
