@@ -356,6 +356,7 @@ def fold_adapter(config, outer_fold: int, validation_index):
         ),
         income_column=frame.INCOME_COLUMN if oversample else None,
         income_digit_transforms=frame.INCOME_DIGIT_TRANSFORMS if oversample else (),
+        recipe_margin=getattr(config, "recipe_margin", False),
     )
 
 
@@ -363,15 +364,25 @@ def fold_predict(config, X_tr, y_fit, X_out):
     """Fit this fold's model(s) on ``X_tr`` and predict ``X_out``.
 
     Honours a seed bag by averaging one member per seed. Shared with the
-    Submission Fit for the same reason as :func:`fold_adapter`.
+    Submission Fit for the same reason as :func:`fold_adapter`. When
+    ``config.recipe_margin`` (#28) is set, the Adapter has carried the
+    calibrated Recipe margin in :data:`adapter.RECIPE_MARGIN_COLUMN` — popped
+    out here and passed as ``init_score`` rather than left in as an ordinary
+    feature, since it is the model's initial prediction, not an input to learn
+    a split on.
     """
     import numpy as np
 
+    import adapter as adapter_mod
     import experiments as experiments_mod
     import models
 
     seed_bag = getattr(config, "seed_bag", ()) or ()
     cat_features = getattr(config, "cat_features", ()) or ()
+    init_score_tr = init_score_out = None
+    if getattr(config, "recipe_margin", False):
+        init_score_tr = X_tr.pop(adapter_mod.RECIPE_MARGIN_COLUMN).to_numpy()
+        init_score_out = X_out.pop(adapter_mod.RECIPE_MARGIN_COLUMN).to_numpy()
     if seed_bag:
         member_preds = [
             models.predict(
@@ -382,10 +393,12 @@ def fold_predict(config, X_tr, y_fit, X_out):
                     num_boost_round=config.num_boost_round,
                     family=config.model,
                     cat_features=cat_features,
+                    init_score=init_score_tr,
                 ),
                 X_out,
                 family=config.model,
                 cat_features=cat_features,
+                init_score=init_score_out,
             )
             for s in seed_bag
         ]
@@ -397,8 +410,9 @@ def fold_predict(config, X_tr, y_fit, X_out):
         num_boost_round=config.num_boost_round,
         family=config.model,
         cat_features=cat_features,
+        init_score=init_score_tr,
     )
-    return models.predict(model, X_out, family=config.model, cat_features=cat_features)
+    return models.predict(model, X_out, family=config.model, cat_features=cat_features, init_score=init_score_out)
 
 
 def run(config) -> dict[str, Any]:

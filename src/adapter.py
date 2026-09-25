@@ -54,6 +54,50 @@ OVERSAMPLE_SMOTENC = "smotenc"
 SMOTENC_SAMPLING_STRATEGY = 0.5  # lift the minority share to 0.5 inside the fold
 _VALID_OVERSAMPLE = (None, OVERSAMPLE_SMOTENC)
 
+# The Recipe (#28, docs/research/generator-recipe.md on branch
+# research/generator-recipe): the publicly reverse-engineered generating rule,
+# ``buy_score = 1.2*(income/1e5) + 0.6*concern + 2*subsidy - 1*(anxiety==Medium)
+# - 3*(anxiety==High)``. Column names match the Baseline Frame's post-one-hot,
+# post-ordinal-encoding layout (``frame.build_frame``), not the raw CSV: the
+# ordinals already carry ``frame.ORDINAL_ENCODINGS``' numbering (Low=0,
+# Medium=1, High=2) and Subsidy is one-hot with no dropped level.
+RECIPE_INCOME_COLUMN = "Annual_Income_USD"
+RECIPE_CONCERN_COLUMN = "Environmental_Concern_Level"
+RECIPE_SUBSIDY_YES_COLUMN = "Subsidy_Available_Yes"
+RECIPE_ANXIETY_COLUMN = "Range_Anxiety_Level"
+RECIPE_INCOME_COEF = 1.2
+RECIPE_CONCERN_COEF = 0.6
+RECIPE_SUBSIDY_COEF = 2.0
+RECIPE_ANXIETY_MEDIUM_COEF = -1.0
+RECIPE_ANXIETY_HIGH_COEF = -3.0
+
+# The column the calibrated Recipe margin is carried in until ``runner`` pops it
+# back out to pass as ``init_score`` — it is not a model feature, it is the
+# model's initial prediction, so it must never reach ``models.fit`` as a column.
+RECIPE_MARGIN_COLUMN = "_recipe_init_score"
+
+
+def recipe_buy_score(X):
+    """The Recipe's raw ``buy_score`` (issue #5), row for row, from a built Frame.
+
+    Pure arithmetic on already-present Frame columns — no target, no fold state
+    — so it is the same before or after the fold boundary. Not itself a usable
+    margin: it is on an arbitrary scale with the Recipe's own threshold at 5.5,
+    which is exactly the ticket #28 question (a raw score handed where a
+    log-odds margin is expected depresses the score).
+    """
+    income = X[RECIPE_INCOME_COLUMN].astype("float64")
+    concern = X[RECIPE_CONCERN_COLUMN].astype("float64")
+    subsidy = X[RECIPE_SUBSIDY_YES_COLUMN].astype("float64")
+    anxiety = X[RECIPE_ANXIETY_COLUMN].astype("float64")
+    return (
+        RECIPE_INCOME_COEF * (income / 1e5)
+        + RECIPE_CONCERN_COEF * concern
+        + RECIPE_SUBSIDY_COEF * subsidy
+        + RECIPE_ANXIETY_MEDIUM_COEF * (anxiety == 1).astype("float64")
+        + RECIPE_ANXIETY_HIGH_COEF * (anxiety == 2).astype("float64")
+    )
+
 
 def inner_seed(outer_fold: int) -> int:
     """The inner split's ``random_state`` for a given outer fold.
@@ -135,6 +179,7 @@ class Adapter:
         oversample_continuous_columns: Sequence[str] = (),
         income_column: str | None = None,
         income_digit_transforms: Sequence = (),
+        recipe_margin: bool = False,
     ) -> None:
         # Plain SMOTE is refused the moment the Adapter is constructed — before
         # any import, so the exclusion holds even where imbalanced-learn is
@@ -158,6 +203,7 @@ class Adapter:
         self.oversample_continuous_columns = tuple(oversample_continuous_columns)
         self.income_column = income_column
         self.income_digit_transforms = tuple(income_digit_transforms)
+        self.recipe_margin = recipe_margin
 
         self.resampled_y = None  # the oversampled training targets, once fitted
         self._fitted = False
@@ -166,6 +212,7 @@ class Adapter:
         self._scale_cols = None
         self._te_maps: dict[str, dict] = {}  # col -> {key: full-training encoding}
         self._te_priors: dict[str, float] = {}  # col -> full-training fold prior
+        self._recipe_calibration: tuple[float, float] | None = None  # (intercept, coef)
 
     # ---- scaling target selection (pure; the digit-child exclusion lives here) #
     def _scale_targets(self) -> list[str]:
@@ -196,6 +243,9 @@ class Adapter:
 
         if self.target_encode:
             out = self._encode_training_rows(out, y_work)
+
+        if self.recipe_margin:
+            out = self._fit_recipe_margin(out, y_work)
 
         if self.scale:
             self._fit_scaler(out)
@@ -249,6 +299,8 @@ class Adapter:
         out = X_va
         if self.target_encode:
             out = self._apply_full_encoding(X_va)
+        if self.recipe_margin:
+            out = self._apply_recipe_margin(out)
         return self._apply_scale(out)
 
     # ---- target encoding --------------------------------------------------- #
@@ -311,6 +363,36 @@ class Adapter:
             mapping = self._te_maps[col]
             prior = self._te_priors[col]
             out[col + TE_SUFFIX] = X[col].map(mapping).fillna(prior)
+        return out
+
+    # ---- the Recipe margin (#28) -------------------------------------------- #
+    def _fit_recipe_margin(self, X, y):
+        """Calibrate the Recipe's raw ``buy_score`` to a log-odds margin.
+
+        A one-parameter-per-term logistic fit of ``y`` on ``buy_score`` (two
+        free numbers: intercept and slope) fitted strictly inside the training
+        fold — it reads ``y``, so it belongs here, the one place that may. Fit
+        on the whole training fold rather than nested cross-fit like the target
+        encoding: two degrees of freedom over hundreds of thousands of rows
+        cannot memorise a row's own label the way a per-key lookup can. Its
+        ``decision_function`` (``intercept + coef*buy_score``) is by
+        construction a valid log-odds margin, unlike the raw ``buy_score`` or an
+        assumed-sigma logit of it.
+        """
+        from sklearn.linear_model import LogisticRegression
+
+        score = recipe_buy_score(X).to_numpy().reshape(-1, 1)
+        clf = LogisticRegression(max_iter=1000)
+        clf.fit(score, y)
+        self._recipe_calibration = (float(clf.intercept_[0]), float(clf.coef_[0][0]))
+        return self._apply_recipe_margin(X)
+
+    def _apply_recipe_margin(self, X):
+        if self._recipe_calibration is None:
+            raise RuntimeError("recipe margin applied before it was fitted")
+        intercept, coef = self._recipe_calibration
+        out = X.copy()
+        out[RECIPE_MARGIN_COLUMN] = intercept + coef * recipe_buy_score(X)
         return out
 
     # ---- scaling ----------------------------------------------------------- #

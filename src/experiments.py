@@ -105,6 +105,10 @@ class Experiment:
     # than a plain numeric. Empty for every non-CatBoost family and for a
     # CatBoost config that runs on the Frame's plain numeric columns instead.
     cat_features: tuple[str, ...] = ()
+    # The Recipe's calibrated margin as LightGBM ``init_score`` (#28). ``False``
+    # for every experiment but the one that tests it — a single-field change
+    # against income_te_tuned, same discipline as every other axis.
+    recipe_margin: bool = False
     health_gate: float = 0.9434
     target_oof: float = 0.94167
 
@@ -129,6 +133,7 @@ class Experiment:
             "seed_bag": list(self.seed_bag),
             "oversample": self.oversample,
             "cat_features": list(self.cat_features),
+            "recipe_margin": self.recipe_margin,
             "params": dict(self.params),
         }
 
@@ -445,6 +450,38 @@ INCOME_TE_TUNED_BAG = replace(
     incumbent="income_te_tuned",
     kill_delta=None,
     kill_value_per_run=SEED_BAG_VALUE_PER_RUN,
+)
+
+
+# --------------------------------------------------------------------------- #
+# The init_score contradiction (#28): -0.0029 measured pre-pipeline (research,
+# docs/research/generator-recipe.md, branch research/generator-recipe) against
+# +0.00005 published in two libraries. The pre-pipeline number used an assumed
+# noise scale to turn the Recipe's buy_score into a logit and early-stopped on
+# the scored fold outside the frozen protocol -- both exactly the failures
+# that inverted the income target encoding's sign before the Adapter existed.
+# This candidate instead calibrates buy_score to a log-odds margin with a
+# 2-parameter logistic fit strictly inside the training fold (adapter.py) and
+# measures it as a Comparison Run under the frozen protocol: fixed rounds, no
+# early stopping, the Baseline Frame, the Canonical Fold Partition. Single-field
+# change against the income_te_tuned Incumbent: recipe_margin = True.
+RECIPE_MARGIN_CALIBRATED = replace(
+    INCOME_TE_TUNED,
+    name="recipe_margin_calibrated",
+    hypothesis=(
+        "The Recipe's buy_score, calibrated to a log-odds margin by a "
+        "2-parameter logistic fit inside the training fold and handed to "
+        "LightGBM as init_score, is an instrument question, not a candidate: "
+        "this ticket resolves either way. As a *candidate* it is dead below "
+        "+0.0001 (the published gain itself sits under our noise floor, so it "
+        "is not expected to survive as a feature) -- the finding to record is "
+        "the sign and magnitude, and which of the two prior measurements "
+        "stands. Single-field change against the income_te_tuned Incumbent: "
+        "recipe_margin = True."
+    ),
+    recipe_margin=True,
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
 )
 
 
@@ -893,6 +930,7 @@ _REGISTRY: dict[str, Experiment] = {
     CONSERVATIVE_TUNING.name: CONSERVATIVE_TUNING,
     INCOME_TE_TUNED.name: INCOME_TE_TUNED,
     INCOME_TE_TUNED_BAG.name: INCOME_TE_TUNED_BAG,
+    RECIPE_MARGIN_CALIBRATED.name: RECIPE_MARGIN_CALIBRATED,
     **{exp.name: exp for exp in MAX_BIN_EXPERIMENTS},
     **{exp.name: exp for exp in REPRESENTATION_AXIS},
     COUNT_ALL13_COMPOSITES.name: COUNT_ALL13_COMPOSITES,

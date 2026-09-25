@@ -233,3 +233,113 @@ def test_run_record_carries_paired_delta_and_kill_criterion() -> None:
     assert record["folds_positive"] == 4
     assert record["fold_deltas"] == [0.0002, 0.0002, -0.0001, 0.0001, 0.0001]
     assert record["kill_criterion"] == {"threshold": 0.0005, "dead": False}
+
+
+# --------------------------------------------------------------------------- #
+# The Recipe margin (#28): the raw buy_score is pure arithmetic (dependency
+# free); calibrating it to a log-odds margin needs the ML stack.
+# --------------------------------------------------------------------------- #
+def test_recipe_buy_score_matches_the_published_formula() -> None:
+    import pandas as pd
+
+    # income=100000 -> 1.0; concern=5; subsidy yes; anxiety=High (2).
+    # 1.2*1.0 + 0.6*5 + 2*1 - 3*1 = 1.2 + 3.0 + 2.0 - 3.0 = 3.2
+    X = pd.DataFrame(
+        {
+            "Annual_Income_USD": [100_000, 0, 50_000],
+            "Environmental_Concern_Level": [5.0, 1.0, 3.0],
+            "Subsidy_Available_Yes": [1, 0, 1],
+            "Range_Anxiety_Level": [2, 0, 1],  # High, Low, Medium
+        }
+    )
+    score = adapter.recipe_buy_score(X).to_numpy()
+    # row 0: 1.2*1.0 + 0.6*5 + 2*1 - 3*1 = 3.2
+    # row 1: 1.2*0.0 + 0.6*1 + 0        - 0 = 0.6
+    # row 2: 1.2*0.5 + 0.6*3 + 2*1 - 1*1 = 0.6 + 1.8 + 2.0 - 1.0 = 3.4
+    expected = [3.2, 0.6, 3.4]
+    assert all(abs(a - b) < 1e-9 for a, b in zip(score, expected))
+
+
+def test_recipe_margin_applied_before_fit_raises() -> None:
+    import pandas as pd
+
+    ad = adapter.Adapter(recipe_margin=True)
+    X = pd.DataFrame(
+        {
+            "Annual_Income_USD": [100_000],
+            "Environmental_Concern_Level": [5.0],
+            "Subsidy_Available_Yes": [1],
+            "Range_Anxiety_Level": [2],
+        }
+    )
+    try:
+        ad._apply_recipe_margin(X)
+    except RuntimeError as exc:
+        assert "before it was fitted" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("applying an unfitted recipe margin must be refused")
+
+
+def test_recipe_margin_is_calibrated_inside_the_fold_and_is_monotone() -> None:
+    """Fitting inside the fold produces a *log-odds* margin, not the raw score.
+
+    A synthetic frame where ``y`` is a noisy monotone function of buy_score:
+    the fitted margin must be strictly increasing in buy_score (a positive
+    slope), and it must differ from the raw buy_score itself — the whole point
+    of calibrating rather than handing LightGBM an arbitrary-scale number.
+    """
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(0)
+    n = 2000
+    income = rng.uniform(0, 200_000, n)
+    concern = rng.integers(1, 6, n).astype(float)
+    subsidy = rng.integers(0, 2, n)
+    anxiety = rng.integers(0, 3, n)
+    X = pd.DataFrame(
+        {
+            "Annual_Income_USD": income,
+            "Environmental_Concern_Level": concern,
+            "Subsidy_Available_Yes": subsidy,
+            "Range_Anxiety_Level": anxiety,
+        }
+    )
+    score = adapter.recipe_buy_score(X).to_numpy()
+    prob = 1.0 / (1.0 + np.exp(-(score - score.mean())))
+    y = (rng.uniform(size=n) < prob).astype(int)
+
+    ad = adapter.Adapter(recipe_margin=True, outer_fold=0, validation_index=set())
+    out = ad.fit_transform(X, y)
+
+    assert adapter.RECIPE_MARGIN_COLUMN in out.columns
+    intercept, coef = ad._recipe_calibration
+    assert coef > 0, "buy_score is positively associated with y, so the fitted slope must be positive"
+
+    margin = out[adapter.RECIPE_MARGIN_COLUMN].to_numpy()
+    assert not np.allclose(margin, score), "the margin must be calibrated, not the raw buy_score"
+
+    # transform() on held-out rows reuses the fitted calibration, not a fresh fit.
+    X_va = X.iloc[:10]
+    va_out = ad.transform(X_va)
+    expected = intercept + coef * score[:10]
+    assert np.allclose(va_out[adapter.RECIPE_MARGIN_COLUMN].to_numpy(), expected)
+
+
+# --------------------------------------------------------------------------- #
+# The recipe_margin_calibrated Experiment: a single-field change against the
+# Incumbent, same discipline as every other axis.
+# --------------------------------------------------------------------------- #
+def test_recipe_margin_calibrated_is_a_single_field_change_against_the_incumbent() -> None:
+    incumbent = experiments.resolve("income_te_tuned")
+    exp = experiments.resolve("recipe_margin_calibrated")
+    assert exp.recipe_margin is True
+    assert incumbent.recipe_margin is False
+    fields = (
+        "frame", "model", "params", "num_boost_round", "fold_seed", "scale",
+        "target_encode", "oversample", "seed_bag", "cat_features",
+    )
+    for f in fields:
+        assert getattr(exp, f) == getattr(incumbent, f), f"{f} must match the Incumbent"
+    assert exp.incumbent == "income_te_tuned"
+    assert exp.kill_delta == 0.0001

@@ -56,6 +56,7 @@ def fit(
     num_boost_round: int = 700,
     family: str = "lightgbm",
     cat_features: Sequence[str] = (),
+    init_score=None,
 ):
     """Fit one model family on ``X``/``y`` under ``params`` for fixed rounds.
 
@@ -63,14 +64,22 @@ def fit(
     so the model cannot peek at the fold it is scored on. ``cat_features``
     names columns CatBoost should treat as categorical, computing its own
     ordered target statistics rather than reading them as plain numerics; it
-    is empty (and ignored) for every family but ``catboost``.
+    is empty (and ignored) for every family but ``catboost``. ``init_score``
+    (#28) is a per-row log-odds margin the model is boosted on top of — LightGBM
+    only; a non-``None`` value for any other family is a caller bug, not a
+    silent no-op.
     """
     if family == "lightgbm":
         import lightgbm as lgb
 
         _assert_max_bin(params.get("max_bin", 255))
-        dtrain = lgb.Dataset(X, label=y, free_raw_data=False)
+        dtrain = lgb.Dataset(X, label=y, init_score=init_score, free_raw_data=False)
         return lgb.train(dict(params), dtrain, num_boost_round=num_boost_round)
+
+    if init_score is not None:
+        raise ValueError(
+            f"init_score is only supported for family='lightgbm', got {family!r}"
+        )
 
     if family == "xgboost":
         import xgboost as xgb
@@ -99,10 +108,26 @@ def fit(
     )
 
 
-def predict(model, X, family: str = "lightgbm", cat_features: Sequence[str] = ()):
-    """Probability predictions for the positive class."""
+def predict(model, X, family: str = "lightgbm", cat_features: Sequence[str] = (), init_score=None):
+    """Probability predictions for the positive class.
+
+    ``init_score`` (#28): LightGBM's ``Booster.predict`` returns the trees'
+    output alone, ignorant of the margin training was boosted on top of — so a
+    model fitted with ``init_score`` must have it added back by hand, in raw
+    (pre-sigmoid) space, before predictions are comparable to a model fitted
+    without one.
+    """
     if family == "lightgbm":
-        return model.predict(X)
+        if init_score is None:
+            return model.predict(X)
+        import numpy as np
+
+        raw = model.predict(X, raw_score=True)
+        return 1.0 / (1.0 + np.exp(-(raw + np.asarray(init_score))))
+    if init_score is not None:
+        raise ValueError(
+            f"init_score is only supported for family='lightgbm', got {family!r}"
+        )
     if family == "xgboost":
         import xgboost as xgb
 
