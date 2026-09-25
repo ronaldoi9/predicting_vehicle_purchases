@@ -1,4 +1,5 @@
-"""Model families behind one signature. Turn 2 (#24) adds XGBoost as a second.
+"""Model families behind one signature. Turn 2 adds XGBoost (#24) and CatBoost
+(#25).
 
 Comparison Runs use a **fixed round count with early stopping disabled** —
 early stopping on the evaluated fold biases OOF upward and breaks the pairing.
@@ -15,7 +16,7 @@ an explicit ``family`` argument rather than inspecting ``params`` — the caller
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 # max_bin must stay at least this large so the 45 distinct Age values remain
 # individually addressable (45 < 64, with headroom).
@@ -38,26 +39,36 @@ def needs_scaling(family: str) -> bool:
     return family not in TREE_FAMILIES
 
 
-def _assert_max_bin(params: Mapping[str, Any], default: int) -> int:
-    max_bin = int(params.get("max_bin", default))
-    if max_bin < MIN_MAX_BIN:
+def _assert_max_bin(value: int) -> int:
+    value = int(value)
+    if value < MIN_MAX_BIN:
         raise AssertionError(
-            f"max_bin={max_bin} < {MIN_MAX_BIN}: too coarse to address the 45 "
+            f"max_bin={value} < {MIN_MAX_BIN}: too coarse to address the 45 "
             "distinct Age values the representation depends on"
         )
-    return max_bin
+    return value
 
 
-def fit(X, y, params: Mapping[str, Any], num_boost_round: int = 700, family: str = "lightgbm"):
+def fit(
+    X,
+    y,
+    params: Mapping[str, Any],
+    num_boost_round: int = 700,
+    family: str = "lightgbm",
+    cat_features: Sequence[str] = (),
+):
     """Fit one model family on ``X``/``y`` under ``params`` for fixed rounds.
 
     No validation set is passed and no early stopping is used for any family,
-    so the model cannot peek at the fold it is scored on.
+    so the model cannot peek at the fold it is scored on. ``cat_features``
+    names columns CatBoost should treat as categorical, computing its own
+    ordered target statistics rather than reading them as plain numerics; it
+    is empty (and ignored) for every family but ``catboost``.
     """
     if family == "lightgbm":
         import lightgbm as lgb
 
-        _assert_max_bin(params, default=255)
+        _assert_max_bin(params.get("max_bin", 255))
         dtrain = lgb.Dataset(X, label=y, free_raw_data=False)
         return lgb.train(dict(params), dtrain, num_boost_round=num_boost_round)
 
@@ -66,14 +77,29 @@ def fit(X, y, params: Mapping[str, Any], num_boost_round: int = 700, family: str
 
         # xgboost's own default max_bin (256) already clears MIN_MAX_BIN, but
         # the assert stays explicit rather than assumed, same as lightgbm.
-        _assert_max_bin(params, default=256)
+        _assert_max_bin(params.get("max_bin", 256))
         dtrain = xgb.DMatrix(X, label=y)
         return xgb.train(dict(params), dtrain, num_boost_round=num_boost_round)
 
-    raise ValueError(f"unknown model family {family!r}; models.fit supports lightgbm, xgboost")
+    if family == "catboost":
+        import catboost as cb
+
+        # catboost's own default border_count (254, its name for max_bin)
+        # already clears MIN_MAX_BIN, but the assert stays explicit rather
+        # than assumed, same as the other two families.
+        border_count = _assert_max_bin(params.get("border_count", 254))
+        cb_params = {k: v for k, v in params.items() if k != "border_count"}
+        pool = cb.Pool(X, label=y, cat_features=list(cat_features) or None)
+        model = cb.CatBoostClassifier(border_count=border_count, iterations=num_boost_round, **cb_params)
+        model.fit(pool)
+        return model
+
+    raise ValueError(
+        f"unknown model family {family!r}; models.fit supports lightgbm, xgboost, catboost"
+    )
 
 
-def predict(model, X, family: str = "lightgbm"):
+def predict(model, X, family: str = "lightgbm", cat_features: Sequence[str] = ()):
     """Probability predictions for the positive class."""
     if family == "lightgbm":
         return model.predict(X)
@@ -81,4 +107,11 @@ def predict(model, X, family: str = "lightgbm"):
         import xgboost as xgb
 
         return model.predict(xgb.DMatrix(X))
-    raise ValueError(f"unknown model family {family!r}; models.predict supports lightgbm, xgboost")
+    if family == "catboost":
+        import catboost as cb
+
+        pool = cb.Pool(X, cat_features=list(cat_features) or None)
+        return model.predict_proba(pool)[:, 1]
+    raise ValueError(
+        f"unknown model family {family!r}; models.predict supports lightgbm, xgboost, catboost"
+    )

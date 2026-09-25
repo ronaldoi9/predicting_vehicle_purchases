@@ -100,6 +100,11 @@ class Experiment:
     # scored against — 2h without +0.0003 -> dead. ``None`` for a candidate not
     # time-boxed (the tuning candidate combines it with ``kill_delta``).
     kill_time_budget_s: float | None = None
+    # CatBoost's own categorical handling (#25): column names CatBoost should
+    # read as categorical, computing its own ordered target statistics rather
+    # than a plain numeric. Empty for every non-CatBoost family and for a
+    # CatBoost config that runs on the Frame's plain numeric columns instead.
+    cat_features: tuple[str, ...] = ()
     health_gate: float = 0.9434
     target_oof: float = 0.94167
 
@@ -123,6 +128,7 @@ class Experiment:
             "target_encode": list(self.target_encode),
             "seed_bag": list(self.seed_bag),
             "oversample": self.oversample,
+            "cat_features": list(self.cat_features),
             "params": dict(self.params),
         }
 
@@ -749,6 +755,97 @@ XGBOOST_TUNED = replace(
 XGBOOST_ARENA: tuple[Experiment, ...] = (XGBOOST_BASELINE, XGBOOST_LOSSGUIDE, XGBOOST_TUNED)
 
 
+from columns import ORDINAL_COLUMNS  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# CatBoost as a third Arena family (#25, turn 2). Same shape as XGBoost's
+# Arena above and deliberately sequenced after it: same Frame as the standing
+# Incumbent (baseline + income target encoding), incumbent still points at
+# income_te_tuned for a printed Paired Delta, and survival is judged on
+# absolute OOF across all three declared configs, not per-run — dead only if
+# all three land below OOF 0.9445.
+#
+# CatBoost's one genuine reason to be here beyond diversity is its ordered
+# target statistics — a different mechanism for what the Model Adapter's
+# nested cross-fit target encoding does by hand, on the column (income) where
+# that hand-rolled encoding banked this project's single largest measured gain
+# (+0.00114). The natural test is CatBoost's own statistics computed directly
+# on income, competing with rather than stacked on the Adapter's encoding —
+# but that needs a Frame without the manual income_te column and with income
+# fed raw as a (very high-cardinality) categorical, which is a Frame change,
+# not a config one, and out of scope for a task ticket reusing the established
+# pattern. Per #25's own kill criterion, that configuration is dropped and
+# recorded here rather than worked around: catboost_ordered_ts instead
+# exercises the mechanism on the two ordinal columns (Environmental_Concern
+# _Level, Range_Anxiety_Level), which the Adapter never touches, so the answer
+# carries no overlap with the income target encoding to state.
+CATBOOST_BASE_PARAMS: dict[str, Any] = {
+    "loss_function": "Logloss",
+    "eval_metric": "AUC",
+    "border_count": 511,
+    "thread_count": 10,
+    "random_seed": 0,
+    "bootstrap_type": "Bernoulli",
+    "subsample": 0.8,
+    "rsm": 0.8,
+    "verbose": False,
+    "allow_writing_files": False,
+}
+
+# Three distinct configurations, same discipline as XGBoost's Arena: idiomatic
+# depth-wise defaults, CatBoost's own categorical handling exercised on the
+# two Adapter-untouched ordinals, and a deeper regularised tree.
+CATBOOST_BASELINE = replace(
+    BASELINE,
+    name="catboost_baseline",
+    hypothesis=(
+        "CatBoost, fit with idiomatic defaults (depth=6, learning_rate=0.05) on "
+        "the same Frame as the standing Incumbent (baseline + income target "
+        "encoding), opens its own Arena chain. This is the family's first "
+        "reproduction number, not a port of LightGBM's or XGBoost's parameters. "
+        "incumbent points at income_te_tuned so a Paired Delta prints, but "
+        "survival is judged on absolute OOF across all three declared configs "
+        "(#25): dead only if all three land below 0.9445."
+    ),
+    model="catboost",
+    target_encode=("Annual_Income_USD",),
+    params={**CATBOOST_BASE_PARAMS, "depth": 6, "learning_rate": 0.05},
+    incumbent="income_te_tuned",
+    target_oof=0.94528,
+)
+
+CATBOOST_ORDERED_TS = replace(
+    CATBOOST_BASELINE,
+    name="catboost_ordered_ts",
+    hypothesis=(
+        "Marking the two ordinal columns (Environmental_Concern_Level, "
+        "Range_Anxiety_Level) as cat_features lets CatBoost compute its own "
+        "ordered target statistics on them instead of reading their plain "
+        "numeric codes -- exercising the mechanism #25 asks about without "
+        "touching income, which the Model Adapter has already target-encoded "
+        "in this Frame (the overlap #25 requires be stated: none, by "
+        "construction). Second of the family's three declared configs (#25)."
+    ),
+    cat_features=ORDINAL_COLUMNS,
+)
+
+CATBOOST_TUNED = replace(
+    CATBOOST_BASELINE,
+    name="catboost_tuned",
+    hypothesis=(
+        "A deeper, regularised CatBoost tree (depth=10, l2_leaf_reg=5.0) trades "
+        "depth for regularisation instead of chasing the other two families' "
+        "shapes. Third of the family's three declared configs (#25) -- the "
+        "aggregate kill criterion (all three below OOF 0.9445) is judged once "
+        "this one has run too."
+    ),
+    params={**CATBOOST_BASE_PARAMS, "depth": 10, "learning_rate": 0.05, "l2_leaf_reg": 5.0},
+)
+
+CATBOOST_ARENA: tuple[Experiment, ...] = (CATBOOST_BASELINE, CATBOOST_ORDERED_TS, CATBOOST_TUNED)
+
+
 # --------------------------------------------------------------------------- #
 # The band (ii) experiment queue, in its declared order (#12, PRD #12).
 # --------------------------------------------------------------------------- #
@@ -800,6 +897,7 @@ _REGISTRY: dict[str, Experiment] = {
     **{exp.name: exp for exp in REPRESENTATION_AXIS},
     COUNT_ALL13_COMPOSITES.name: COUNT_ALL13_COMPOSITES,
     **{exp.name: exp for exp in XGBOOST_ARENA},
+    **{exp.name: exp for exp in CATBOOST_ARENA},
 }
 
 
