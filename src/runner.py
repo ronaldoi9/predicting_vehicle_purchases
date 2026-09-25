@@ -357,6 +357,8 @@ def fold_adapter(config, outer_fold: int, validation_index):
         income_column=frame.INCOME_COLUMN if oversample else None,
         income_digit_transforms=frame.INCOME_DIGIT_TRANSFORMS if oversample else (),
         recipe_margin=getattr(config, "recipe_margin", False),
+        fitted_margin=getattr(config, "fitted_margin", False),
+        fitted_margin_calibrate=getattr(config, "fitted_margin_calibrate", False),
     )
 
 
@@ -365,11 +367,11 @@ def fold_predict(config, X_tr, y_fit, X_out):
 
     Honours a seed bag by averaging one member per seed. Shared with the
     Submission Fit for the same reason as :func:`fold_adapter`. When
-    ``config.recipe_margin`` (#28) is set, the Adapter has carried the
-    calibrated Recipe margin in :data:`adapter.RECIPE_MARGIN_COLUMN` — popped
-    out here and passed as ``init_score`` rather than left in as an ordinary
-    feature, since it is the model's initial prediction, not an input to learn
-    a split on.
+    ``config.recipe_margin`` (#28) or ``config.fitted_margin`` (#33) is set,
+    the Adapter has carried its margin in :data:`adapter.RECIPE_MARGIN_COLUMN`
+    or :data:`adapter.FITTED_MARGIN_COLUMN` — popped out here and passed as
+    ``init_score`` rather than left in as an ordinary feature, since it is the
+    model's initial prediction, not an input to learn a split on.
     """
     import numpy as np
 
@@ -383,6 +385,9 @@ def fold_predict(config, X_tr, y_fit, X_out):
     if getattr(config, "recipe_margin", False):
         init_score_tr = X_tr.pop(adapter_mod.RECIPE_MARGIN_COLUMN).to_numpy()
         init_score_out = X_out.pop(adapter_mod.RECIPE_MARGIN_COLUMN).to_numpy()
+    elif getattr(config, "fitted_margin", False):
+        init_score_tr = X_tr.pop(adapter_mod.FITTED_MARGIN_COLUMN).to_numpy()
+        init_score_out = X_out.pop(adapter_mod.FITTED_MARGIN_COLUMN).to_numpy()
     if seed_bag:
         member_preds = [
             models.predict(

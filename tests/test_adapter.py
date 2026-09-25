@@ -343,3 +343,155 @@ def test_recipe_margin_calibrated_is_a_single_field_change_against_the_incumbent
         assert getattr(exp, f) == getattr(incumbent, f), f"{f} must match the Incumbent"
     assert exp.incumbent == "income_te_tuned"
     assert exp.kill_delta == 0.0001
+
+
+# --------------------------------------------------------------------------- #
+# The fitted additive-logistic margin (#33): a saturated gate over
+# concern x subsidy x anxiety plus a box-smoothed per-income-value basis,
+# fitted strictly inside the training fold. Needs the ML stack (sklearn's
+# LogisticRegression and scipy sparse matrices).
+# --------------------------------------------------------------------------- #
+def _fitted_margin_frame(n: int, seed: int = 0):
+    import numpy as np
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    income = rng.integers(30_000, 190_000, n).astype(float)
+    concern = rng.integers(1, 6, n).astype(float)
+    subsidy = rng.integers(0, 2, n)
+    anxiety = rng.integers(0, 3, n)
+    X = pd.DataFrame(
+        {
+            "Annual_Income_USD": income,
+            "Environmental_Concern_Level": concern,
+            "Subsidy_Available_Yes": subsidy,
+            "Range_Anxiety_Level": anxiety,
+        }
+    )
+    return X, income, concern, subsidy, anxiety
+
+
+def test_gate_code_is_the_saturated_concern_subsidy_anxiety_interaction() -> None:
+    import pandas as pd
+
+    X = pd.DataFrame(
+        {
+            "Environmental_Concern_Level": [5.0, 1.0, 3.0],
+            "Subsidy_Available_Yes": [1, 0, 1],
+            "Range_Anxiety_Level": [2, 0, 1],
+        }
+    )
+    code = adapter._gate_code(X)
+    # concern*6 + subsidy*3 + anxiety
+    expected = [5 * 6 + 1 * 3 + 2, 1 * 6 + 0 * 3 + 0, 3 * 6 + 1 * 3 + 1]
+    assert list(code) == expected
+
+
+def test_fitted_margin_applied_before_fit_raises() -> None:
+    import pandas as pd
+
+    ad = adapter.Adapter(fitted_margin=True)
+    X = pd.DataFrame(
+        {
+            "Annual_Income_USD": [100_000],
+            "Environmental_Concern_Level": [5.0],
+            "Subsidy_Available_Yes": [1],
+            "Range_Anxiety_Level": [2],
+        }
+    )
+    try:
+        ad._apply_fitted_margin(X)
+    except RuntimeError as exc:
+        assert "before it was fitted" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("applying an unfitted fitted margin must be refused")
+
+
+def test_fitted_margin_is_a_valid_log_odds_margin_and_reuses_the_fold_fit() -> None:
+    """The fitted margin must be genuine signal (associated with y), and a
+    held-out row must be scored by the fold-fitted encoders/model, not refit.
+    """
+    import numpy as np
+
+    X, income, concern, subsidy, anxiety = _fitted_margin_frame(4000)
+    # y depends on the gate and on income being above/below its median, so a
+    # margin with no signal (e.g. the intercept alone) could not separate it.
+    gate_effect = (subsidy == 1) & (concern >= 4)
+    income_effect = income > np.median(income)
+    rng = np.random.default_rng(1)
+    logit = 2.0 * gate_effect.astype(float) + 1.5 * income_effect.astype(float) - 1.5
+    prob = 1.0 / (1.0 + np.exp(-logit))
+    y = (rng.uniform(size=len(prob)) < prob).astype(int)
+
+    ad = adapter.Adapter(fitted_margin=True, outer_fold=0, validation_index=set())
+    out = ad.fit_transform(X, y)
+
+    assert adapter.FITTED_MARGIN_COLUMN in out.columns
+    margin = out[adapter.FITTED_MARGIN_COLUMN].to_numpy()
+    from sklearn.metrics import roc_auc_score
+
+    assert roc_auc_score(y, margin) > 0.7, "the fitted margin should recover the planted signal"
+
+    # transform() on held-out rows must reuse the fold-fitted state, not refit:
+    # scoring the same rows again through transform() reproduces fit_transform's
+    # own margin column exactly.
+    X_va = X.iloc[:25]
+    va_out = ad.transform(X_va)
+    assert np.allclose(va_out[adapter.FITTED_MARGIN_COLUMN].to_numpy(), margin[:25])
+
+
+def test_fitted_margin_calibrate_recalibrates_the_raw_margin() -> None:
+    """``fitted_margin_calibrate=True`` must change the output relative to the
+    raw margin (a second, real logistic fit happened), while both remain valid
+    (finite, non-constant) log-odds margins on the same rows.
+    """
+    import numpy as np
+
+    X, income, concern, subsidy, anxiety = _fitted_margin_frame(3000, seed=2)
+    rng = np.random.default_rng(3)
+    logit = 0.6 * (income > np.median(income)).astype(float) - 0.3
+    prob = 1.0 / (1.0 + np.exp(-logit))
+    y = (rng.uniform(size=len(prob)) < prob).astype(int)
+
+    raw = adapter.Adapter(fitted_margin=True, fitted_margin_calibrate=False, outer_fold=0, validation_index=set())
+    raw_out = raw.fit_transform(X, y)
+    raw_margin = raw_out[adapter.FITTED_MARGIN_COLUMN].to_numpy()
+
+    calibrated = adapter.Adapter(fitted_margin=True, fitted_margin_calibrate=True, outer_fold=0, validation_index=set())
+    calibrated_out = calibrated.fit_transform(X, y)
+    calibrated_margin = calibrated_out[adapter.FITTED_MARGIN_COLUMN].to_numpy()
+
+    assert np.all(np.isfinite(raw_margin)) and np.all(np.isfinite(calibrated_margin))
+    assert calibrated._fitted_margin_state["calibration"] is not None
+    assert raw._fitted_margin_state["calibration"] is None
+
+
+def test_income_box_design_spreads_a_row_across_adjacent_ranks() -> None:
+    """Box smoothing: a row's income activates a window of neighbouring ranks
+    in the sorted distinct training values, not only its own exact value.
+    """
+    import numpy as np
+
+    sorted_uniques = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+    income = np.array([30.0])  # rank 2, the middle value
+    design = adapter._income_box_design(income, sorted_uniques, half_width=1)
+    row = design.toarray()[0]
+    # half_width=1 activates ranks 1, 2 and 3 (values 20, 30, 40).
+    assert list(row) == [0.0, 1.0, 1.0, 1.0, 0.0]
+
+
+def test_fitted_margin_raw_and_calibrated_are_single_field_changes_against_the_incumbent() -> None:
+    incumbent = experiments.resolve("income_te_tuned")
+    fields = (
+        "frame", "model", "params", "num_boost_round", "fold_seed", "scale",
+        "target_encode", "oversample", "seed_bag", "cat_features", "recipe_margin",
+    )
+    for name in ("fitted_margin_raw", "fitted_margin_calibrated"):
+        exp = experiments.resolve(name)
+        for f in fields:
+            assert getattr(exp, f) == getattr(incumbent, f), f"{name}: {f} must match the Incumbent"
+        assert exp.incumbent == "income_te_tuned"
+        assert exp.kill_delta == 0.0001
+        assert exp.fitted_margin is True
+    assert experiments.resolve("fitted_margin_raw").fitted_margin_calibrate is False
+    assert experiments.resolve("fitted_margin_calibrated").fitted_margin_calibrate is True

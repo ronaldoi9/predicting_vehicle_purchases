@@ -76,6 +76,40 @@ RECIPE_ANXIETY_HIGH_COEF = -3.0
 # model's initial prediction, so it must never reach ``models.fit`` as a column.
 RECIPE_MARGIN_COLUMN = "_recipe_init_score"
 
+# The fitted additive-logistic margin (#33): a saturated gate over
+# concern x subsidy x anxiety plus a per-exact-income-value basis, fitted
+# strictly inside the training fold and carried the same way as the Recipe
+# margin above -- popped by ``runner`` and passed as ``init_score``, never a
+# Frame feature a tree could split on.
+FITTED_MARGIN_COLUMN = "_fitted_init_score"
+
+# The gate's saturated interaction: concern*6 + subsidy*3 + anxiety, from
+# #26's reading of the published notebook (kps6e09-xgb-sample). One-hot
+# encoded whole, not marginal dummies per column, so every combination gets
+# its own free coefficient (a "31-level saturated gate").
+FITTED_MARGIN_GATE_COLUMNS = (
+    RECIPE_CONCERN_COLUMN,
+    RECIPE_SUBSIDY_YES_COLUMN,
+    RECIPE_ANXIETY_COLUMN,
+)
+
+# The income basis's box-smoothing half-width, in ranks over the sorted
+# distinct training-fold income values (~13,214 of them, matching #26's
+# "~13k-coefficient block" almost exactly at box_width=1 -- one column per
+# unique value). A half-width of 2 gives every row a 5-wide boxcar of
+# adjacent-value columns rather than a single exact-value indicator, so
+# neighbouring income values share support ("box smoothing across adjacent
+# income values") without a custom penalised-GLM solver: an ordinary L2
+# (ridge) logistic fit over the boxcar design already pulls neighbours
+# toward each other because their columns overlap.
+FITTED_MARGIN_INCOME_HALF_WIDTH = 2
+
+# The ridge strength handed to sklearn's LogisticRegression (its inverse, as
+# the library parameterises it). Left at sklearn's own default rather than
+# tuned -- tuning the margin model is out of scope for this ticket's
+# cheapest-decisive-test question, and belongs to #34 if this axis survives.
+FITTED_MARGIN_RIDGE_C = 1.0
+
 
 def recipe_buy_score(X):
     """The Recipe's raw ``buy_score`` (issue #5), row for row, from a built Frame.
@@ -97,6 +131,48 @@ def recipe_buy_score(X):
         + RECIPE_ANXIETY_MEDIUM_COEF * (anxiety == 1).astype("float64")
         + RECIPE_ANXIETY_HIGH_COEF * (anxiety == 2).astype("float64")
     )
+
+
+def _gate_code(X):
+    """The saturated gate's integer key: concern*6 + subsidy*3 + anxiety.
+
+    Purely a categorical key for one-hot encoding (the arithmetic carries no
+    ordering meaning) -- see :data:`FITTED_MARGIN_GATE_COLUMNS`.
+    """
+    concern = X[RECIPE_CONCERN_COLUMN].to_numpy().astype("int64")
+    subsidy = X[RECIPE_SUBSIDY_YES_COLUMN].to_numpy().astype("int64")
+    anxiety = X[RECIPE_ANXIETY_COLUMN].to_numpy().astype("int64")
+    return concern * 6 + subsidy * 3 + anxiety
+
+
+def _income_box_design(income, sorted_uniques, half_width):
+    """A boxcar (box-smoothing) design over the sorted distinct income values.
+
+    Row ``i`` activates every column within ``half_width`` ranks of its own
+    income value's rank in ``sorted_uniques`` -- a uniform-weight moving
+    window, so a value's fitted effect is pulled toward its neighbours by the
+    shared columns rather than fitted as an isolated per-value indicator.
+    Values absent from ``sorted_uniques`` (a held-out row) fall to the
+    neighbouring rank via ``searchsorted``. Boundary ranks near either end
+    can hit the same clipped column twice across offsets; ``csr_matrix``
+    sums those duplicates, adding at most 1.0 extra weight to the outermost
+    handful of the ~13k columns -- negligible next to the ridge penalty.
+    """
+    import numpy as np
+    from scipy import sparse
+
+    n = len(income)
+    u = len(sorted_uniques)
+    ranks = np.clip(np.searchsorted(sorted_uniques, income), 0, u - 1)
+    rows_parts = []
+    cols_parts = []
+    for offset in range(-half_width, half_width + 1):
+        cols_parts.append(np.clip(ranks + offset, 0, u - 1))
+        rows_parts.append(np.arange(n))
+    rows = np.concatenate(rows_parts)
+    cols = np.concatenate(cols_parts)
+    data = np.ones(len(rows), dtype=np.float64)
+    return sparse.csr_matrix((data, (rows, cols)), shape=(n, u))
 
 
 def inner_seed(outer_fold: int) -> int:
@@ -180,6 +256,9 @@ class Adapter:
         income_column: str | None = None,
         income_digit_transforms: Sequence = (),
         recipe_margin: bool = False,
+        fitted_margin: bool = False,
+        fitted_margin_calibrate: bool = False,
+        fitted_margin_income_half_width: int = FITTED_MARGIN_INCOME_HALF_WIDTH,
     ) -> None:
         # Plain SMOTE is refused the moment the Adapter is constructed — before
         # any import, so the exclusion holds even where imbalanced-learn is
@@ -204,6 +283,9 @@ class Adapter:
         self.income_column = income_column
         self.income_digit_transforms = tuple(income_digit_transforms)
         self.recipe_margin = recipe_margin
+        self.fitted_margin = fitted_margin
+        self.fitted_margin_calibrate = fitted_margin_calibrate
+        self.fitted_margin_income_half_width = fitted_margin_income_half_width
 
         self.resampled_y = None  # the oversampled training targets, once fitted
         self._fitted = False
@@ -213,6 +295,7 @@ class Adapter:
         self._te_maps: dict[str, dict] = {}  # col -> {key: full-training encoding}
         self._te_priors: dict[str, float] = {}  # col -> full-training fold prior
         self._recipe_calibration: tuple[float, float] | None = None  # (intercept, coef)
+        self._fitted_margin_state: dict | None = None
 
     # ---- scaling target selection (pure; the digit-child exclusion lives here) #
     def _scale_targets(self) -> list[str]:
@@ -246,6 +329,9 @@ class Adapter:
 
         if self.recipe_margin:
             out = self._fit_recipe_margin(out, y_work)
+
+        if self.fitted_margin:
+            out = self._fit_fitted_margin(out, y_work)
 
         if self.scale:
             self._fit_scaler(out)
@@ -301,6 +387,8 @@ class Adapter:
             out = self._apply_full_encoding(X_va)
         if self.recipe_margin:
             out = self._apply_recipe_margin(out)
+        if self.fitted_margin:
+            out = self._apply_fitted_margin(out)
         return self._apply_scale(out)
 
     # ---- target encoding --------------------------------------------------- #
@@ -393,6 +481,98 @@ class Adapter:
         intercept, coef = self._recipe_calibration
         out = X.copy()
         out[RECIPE_MARGIN_COLUMN] = intercept + coef * recipe_buy_score(X)
+        return out
+
+    # ---- the fitted additive-logistic margin (#33) -------------------------- #
+    def _fitted_margin_design(self, X, *, fit: bool):
+        """The gate + income-box design matrix, fitting or reusing the encoders.
+
+        Shared by fit and transform so the two paths cannot drift: the gate's
+        one-hot vocabulary and the income basis's sorted training values are
+        learned once, here, on the training fold only.
+        """
+        import numpy as np
+        from sklearn.preprocessing import OneHotEncoder
+
+        gate = _gate_code(X).reshape(-1, 1)
+        income = X[RECIPE_INCOME_COLUMN].to_numpy()
+
+        if fit:
+            gate_encoder = OneHotEncoder(handle_unknown="ignore")
+            gate_design = gate_encoder.fit_transform(gate)
+            sorted_uniques = np.unique(income)
+            self._fitted_margin_state = {
+                "gate_encoder": gate_encoder,
+                "income_sorted_uniques": sorted_uniques,
+            }
+        else:
+            state = self._fitted_margin_state
+            gate_design = state["gate_encoder"].transform(gate)
+            sorted_uniques = state["income_sorted_uniques"]
+
+        income_design = _income_box_design(
+            income, sorted_uniques, self.fitted_margin_income_half_width
+        )
+        from scipy import sparse
+
+        return sparse.hstack([gate_design, income_design], format="csr")
+
+    def _fit_fitted_margin(self, X, y):
+        """Fit the additive-logistic margin (#33) strictly inside the training
+        fold: a saturated gate over concern x subsidy x anxiety plus a
+        box-smoothed per-income-value basis, ridge-penalised by an ordinary
+        L2 logistic fit. Its own ``decision_function`` is by construction a
+        valid log-odds margin. When ``fitted_margin_calibrate`` is set, that
+        raw margin is further recalibrated by a 2-parameter logistic fit
+        (intercept + slope), the same pattern #28 uses for the Recipe margin
+        -- fitted on the whole training fold, not nested cross-fit, because a
+        handful of coefficients over hundreds of thousands of rows cannot
+        memorise a row's own label the way a per-key lookup can.
+        """
+        from sklearn.linear_model import LogisticRegression
+
+        design = self._fitted_margin_design(X, fit=True)
+        # penalty defaults to L2 (ridge); passing it explicitly is deprecated
+        # in sklearn>=1.8 in favour of l1_ratio, so C alone selects the ridge
+        # strength. max_iter=300: the ~13k-column sparse design does not fully
+        # converge at sklearn's default 100 (a bug report about runtime, not
+        # about the finding -- the kill criterion already reads decisively).
+        clf = LogisticRegression(C=FITTED_MARGIN_RIDGE_C, solver="lbfgs", max_iter=300)
+        clf.fit(design, y)
+        self._fitted_margin_state["model"] = clf
+        self._fitted_margin_state["calibration"] = None
+
+        raw_margin = clf.decision_function(design)
+        if self.fitted_margin_calibrate:
+            calib = LogisticRegression(max_iter=1000)
+            calib.fit(raw_margin.reshape(-1, 1), y)
+            self._fitted_margin_state["calibration"] = (
+                float(calib.intercept_[0]),
+                float(calib.coef_[0][0]),
+            )
+            margin = self._fitted_margin_state["calibration"][0] + (
+                self._fitted_margin_state["calibration"][1] * raw_margin
+            )
+        else:
+            margin = raw_margin
+
+        out = X.copy()
+        out[FITTED_MARGIN_COLUMN] = margin
+        return out
+
+    def _apply_fitted_margin(self, X):
+        if self._fitted_margin_state is None or "model" not in self._fitted_margin_state:
+            raise RuntimeError("fitted margin applied before it was fitted")
+        design = self._fitted_margin_design(X, fit=False)
+        state = self._fitted_margin_state
+        raw_margin = state["model"].decision_function(design)
+        if state["calibration"] is not None:
+            intercept, coef = state["calibration"]
+            margin = intercept + coef * raw_margin
+        else:
+            margin = raw_margin
+        out = X.copy()
+        out[FITTED_MARGIN_COLUMN] = margin
         return out
 
     # ---- scaling ----------------------------------------------------------- #

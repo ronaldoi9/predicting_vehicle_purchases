@@ -109,6 +109,14 @@ class Experiment:
     # for every experiment but the one that tests it — a single-field change
     # against income_te_tuned, same discipline as every other axis.
     recipe_margin: bool = False
+    # The fitted additive-logistic margin as LightGBM ``init_score`` (#33): a
+    # saturated gate over concern x subsidy x anxiety plus a box-smoothed
+    # per-income-value basis, fitted inside the training fold (adapter.py).
+    # ``fitted_margin_calibrate`` selects the ticket's second configuration —
+    # the raw margin further recalibrated by a 2-parameter logistic fit,
+    # same pattern as #28's Recipe-margin calibration.
+    fitted_margin: bool = False
+    fitted_margin_calibrate: bool = False
     health_gate: float = 0.9434
     target_oof: float = 0.94167
 
@@ -134,6 +142,8 @@ class Experiment:
             "oversample": self.oversample,
             "cat_features": list(self.cat_features),
             "recipe_margin": self.recipe_margin,
+            "fitted_margin": self.fitted_margin,
+            "fitted_margin_calibrate": self.fitted_margin_calibrate,
             "params": dict(self.params),
         }
 
@@ -482,6 +492,63 @@ RECIPE_MARGIN_CALIBRATED = replace(
     recipe_margin=True,
     incumbent="income_te_tuned",
     kill_delta=0.0001,
+)
+
+
+# --------------------------------------------------------------------------- #
+# The additive-logistic margin as init_score (#33): the cheap decisive test
+# on the linear axis, and the reason it runs before the full linear chain
+# (#34, blocked on this ticket's finding) is built. From #26's verified
+# reading of the published notebook's actual source (kps6e09-xgb-sample,
+# not the Recipe's closed form): a ridge-Newton penalised additive logistic
+# model -- a 31-level saturated gate over concern x subsidy x anxiety plus a
+# per-exact-income-value basis with box smoothing. Fitted strictly inside the
+# training fold (adapter.py), calibrated to log-odds by construction (its own
+# LogisticRegression.decision_function). Two configurations, per the Axis
+# rule declared in the ticket: the raw margin, and the margin further
+# recalibrated by a 2-parameter logistic fit inside the fold (the same
+# pattern #28 used for the Recipe margin). Single-field change against the
+# income_te_tuned Incumbent in each case.
+FITTED_MARGIN_RAW = replace(
+    INCOME_TE_TUNED,
+    name="fitted_margin_raw",
+    hypothesis=(
+        "The additive-logistic margin -- a saturated gate over concern x "
+        "subsidy x anxiety plus a box-smoothed per-income-value basis, "
+        "fitted inside the training fold -- handed to LightGBM as init_score "
+        "unmodified (its own decision_function is already a valid log-odds "
+        "margin by construction) beats the Incumbent. The only linear->GBDT "
+        "mechanism anywhere in the public record with a replicated number "
+        "(+0.00005-0.00007, Deotte 739321), itself below our Noise Floor. "
+        "Single-field change against the Incumbent: fitted_margin = True. "
+        "Kill criterion, declared before running: paired delta < +0.0001 -> "
+        "dead; two configurations (this one and fitted_margin_calibrated) "
+        "get measured before the mechanism is called dead."
+    ),
+    fitted_margin=True,
+    fitted_margin_calibrate=False,
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+)
+
+FITTED_MARGIN_CALIBRATED = replace(
+    FITTED_MARGIN_RAW,
+    name="fitted_margin_calibrated",
+    hypothesis=(
+        "The same additive-logistic margin, further recalibrated inside the "
+        "training fold by a 2-parameter logistic fit (intercept + slope) on "
+        "its own raw margin before being handed to LightGBM as init_score -- "
+        "the same recalibration pattern #28 used for the Recipe margin -- "
+        "beats the Incumbent (or beats fitted_margin_raw, if the margin model "
+        "is not already well-calibrated to this fold). Second of the two "
+        "declared configurations. Single-field change against the Incumbent: "
+        "fitted_margin = True, fitted_margin_calibrate = True. Kill "
+        "criterion, declared before running: paired delta < +0.0001 -> dead. "
+        "If both configurations die, #34 loses its cheapest justification and "
+        "the map re-ranks it rather than building six Frame changes on a "
+        "hope."
+    ),
+    fitted_margin_calibrate=True,
 )
 
 
@@ -931,6 +998,8 @@ _REGISTRY: dict[str, Experiment] = {
     INCOME_TE_TUNED.name: INCOME_TE_TUNED,
     INCOME_TE_TUNED_BAG.name: INCOME_TE_TUNED_BAG,
     RECIPE_MARGIN_CALIBRATED.name: RECIPE_MARGIN_CALIBRATED,
+    FITTED_MARGIN_RAW.name: FITTED_MARGIN_RAW,
+    FITTED_MARGIN_CALIBRATED.name: FITTED_MARGIN_CALIBRATED,
     **{exp.name: exp for exp in MAX_BIN_EXPERIMENTS},
     **{exp.name: exp for exp in REPRESENTATION_AXIS},
     COUNT_ALL13_COMPOSITES.name: COUNT_ALL13_COMPOSITES,
