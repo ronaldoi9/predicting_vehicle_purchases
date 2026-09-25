@@ -58,6 +58,7 @@ def fit(
     family: str = "lightgbm",
     cat_features: Sequence[str] = (),
     init_score=None,
+    weight=None,
 ):
     """Fit one model family on ``X``/``y`` under ``params`` for fixed rounds.
 
@@ -68,18 +69,26 @@ def fit(
     is empty (and ignored) for every family but ``catboost``. ``init_score``
     (#28) is a per-row log-odds margin the model is boosted on top of — LightGBM
     only; a non-``None`` value for any other family is a caller bug, not a
-    silent no-op.
+    silent no-op. ``weight`` (#31) is a per-row sample weight — pseudo-labelled
+    rows are admitted at a declared weight rather than a real row's implicit
+    1.0 — also LightGBM only, same guard as ``init_score``.
     """
     if family == "lightgbm":
         import lightgbm as lgb
 
         _assert_max_bin(params.get("max_bin", 255))
-        dtrain = lgb.Dataset(X, label=y, init_score=init_score, free_raw_data=False)
+        dtrain = lgb.Dataset(
+            X, label=y, weight=weight, init_score=init_score, free_raw_data=False
+        )
         return lgb.train(dict(params), dtrain, num_boost_round=num_boost_round)
 
     if init_score is not None:
         raise ValueError(
             f"init_score is only supported for family='lightgbm', got {family!r}"
+        )
+    if weight is not None:
+        raise ValueError(
+            f"weight is only supported for family='lightgbm', got {family!r}"
         )
 
     if family == "xgboost":

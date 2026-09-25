@@ -125,6 +125,19 @@ class Experiment:
     # rather than assumed.
     linear_design: bool = False
     linear_gate: bool = True
+    # Pseudo-labelling the 286,571 test rows (#31): per outer fold, a teacher
+    # fit on that fold's own training rows predicts the test set, and a
+    # student is refit on the training rows plus those pseudo-labelled test
+    # rows before producing the fold's OOF prediction. ``False``/``None`` for
+    # every experiment but the two declared here. ``pseudo_label_threshold``
+    # set selects the threshold variant (only confident test rows, hard
+    # 0/1-labelled); left ``None`` selects the weight variant (every test row,
+    # soft-labelled with the teacher's raw probability). Either way
+    # ``pseudo_label_weight`` is the sample weight the pseudo-labelled rows
+    # are admitted at, real rows keeping their implicit 1.0.
+    pseudo_label: bool = False
+    pseudo_label_threshold: float | None = None
+    pseudo_label_weight: float | None = None
     health_gate: float = 0.9434
     target_oof: float = 0.94167
 
@@ -154,6 +167,9 @@ class Experiment:
             "fitted_margin_calibrate": self.fitted_margin_calibrate,
             "linear_design": self.linear_design,
             "linear_gate": self.linear_gate,
+            "pseudo_label": self.pseudo_label,
+            "pseudo_label_threshold": self.pseudo_label_threshold,
+            "pseudo_label_weight": self.pseudo_label_weight,
             "params": dict(self.params),
         }
 
@@ -1046,6 +1062,68 @@ LINEAR_ARENA: tuple[Experiment, ...] = (LINEAR_BASELINE, LINEAR_NO_GATE, LINEAR_
 
 
 # --------------------------------------------------------------------------- #
+# Pseudo-labelling the 286,571 test rows (#31), revived from ADR-0004's unrun
+# kill with a criterion declared first. Two configurations against the
+# standing Incumbent income_te_tuned, each a single-field change
+# (pseudo_label plus exactly one of threshold/weight): a threshold variant
+# (only the teacher's confident test rows, hard-labelled) and a weight
+# variant (every test row, soft-labelled, down-weighted). The honest prior is
+# low — #4's Bayes-optimal re-ranking margin (0.00007) says there is little
+# headroom left for a teacher's own opinions to teach back. Kill criterion,
+# declared before running: paired delta < +0.0003 on the canonical seed, or
+# positive in < 4/5 folds (the ordinary bar, enforced by verdict.classify
+# regardless of magnitude) -> dead. The axis is declared dead once both
+# configurations fail.
+# --------------------------------------------------------------------------- #
+
+PSEUDO_LABEL_THRESHOLD = replace(
+    INCOME_TE_TUNED,
+    name="pseudo_label_threshold",
+    hypothesis=(
+        "The confidence-threshold variant: per outer fold, a teacher fit on "
+        "that fold's own training rows scores the 286,571 test rows; only the "
+        "rows it is confident on (probability >= 0.95 or <= 0.05) are "
+        "hard-labelled and added to the student's training set at weight "
+        "1.0 (the same as a real row). Confident rows are the ones least "
+        "likely to be the model's own noise fed back as signal, so this is "
+        "the conservative configuration of the two declared here. Single-field "
+        "change against income_te_tuned: pseudo_label=True, "
+        "pseudo_label_threshold=0.95, pseudo_label_weight=1.0. Kill criterion, "
+        "declared before running: paired delta < +0.0003, or positive in "
+        "< 4/5 folds -> dead."
+    ),
+    pseudo_label=True,
+    pseudo_label_threshold=0.95,
+    pseudo_label_weight=1.0,
+    incumbent="income_te_tuned",
+    kill_delta=0.0003,
+)
+
+PSEUDO_LABEL_WEIGHT = replace(
+    INCOME_TE_TUNED,
+    name="pseudo_label_weight",
+    hypothesis=(
+        "The soft-weight variant: per outer fold, the same per-fold teacher "
+        "soft-labels every one of the 286,571 test rows with its raw "
+        "probability (LightGBM's binary objective reads a continuous target "
+        "as a cross-entropy soft label) and the student trains on the fold's "
+        "real rows plus all of them, down-weighted to 0.3 so the pseudo-"
+        "labelled 43%-of-all-rows mass cannot outvote the real training fold. "
+        "Single-field change against income_te_tuned: pseudo_label=True, "
+        "pseudo_label_weight=0.3 (pseudo_label_threshold left unset, selecting "
+        "the weight variant). Kill criterion, declared before running: paired "
+        "delta < +0.0003, or positive in < 4/5 folds -> dead."
+    ),
+    pseudo_label=True,
+    pseudo_label_weight=0.3,
+    incumbent="income_te_tuned",
+    kill_delta=0.0003,
+)
+
+PSEUDO_LABEL_ARENA: tuple[Experiment, ...] = (PSEUDO_LABEL_THRESHOLD, PSEUDO_LABEL_WEIGHT)
+
+
+# --------------------------------------------------------------------------- #
 # The band (ii) experiment queue, in its declared order (#12, PRD #12).
 # --------------------------------------------------------------------------- #
 # Story 62: the queue is run in its declared order, so the candidate with a
@@ -1101,6 +1179,7 @@ _REGISTRY: dict[str, Experiment] = {
     **{exp.name: exp for exp in XGBOOST_ARENA},
     **{exp.name: exp for exp in CATBOOST_ARENA},
     **{exp.name: exp for exp in LINEAR_ARENA},
+    **{exp.name: exp for exp in PSEUDO_LABEL_ARENA},
 }
 
 

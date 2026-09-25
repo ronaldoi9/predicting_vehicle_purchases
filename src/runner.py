@@ -373,7 +373,7 @@ def fold_adapter(config, outer_fold: int, validation_index):
     )
 
 
-def fold_predict(config, X_tr, y_fit, X_out):
+def fold_predict(config, X_tr, y_fit, X_out, weight=None):
     """Fit this fold's model(s) on ``X_tr`` and predict ``X_out``.
 
     Honours a seed bag by averaging one member per seed. Shared with the
@@ -382,7 +382,10 @@ def fold_predict(config, X_tr, y_fit, X_out):
     the Adapter has carried its margin in :data:`adapter.RECIPE_MARGIN_COLUMN`
     or :data:`adapter.FITTED_MARGIN_COLUMN` — popped out here and passed as
     ``init_score`` rather than left in as an ordinary feature, since it is the
-    model's initial prediction, not an input to learn a split on.
+    model's initial prediction, not an input to learn a split on. ``weight``
+    (#31) is an optional per-row sample weight — used by pseudo-labelling to
+    admit a teacher's test-row labels at less than a real row's implicit 1.0;
+    not supported together with a seed bag (nothing declared needs both).
     """
     import numpy as np
 
@@ -391,6 +394,8 @@ def fold_predict(config, X_tr, y_fit, X_out):
     import models
 
     seed_bag = getattr(config, "seed_bag", ()) or ()
+    if weight is not None and seed_bag:
+        raise ValueError("fold_predict: weight is not supported together with a seed bag")
     cat_features = getattr(config, "cat_features", ()) or ()
     init_score_tr = init_score_out = None
     if getattr(config, "recipe_margin", False):
@@ -427,8 +432,54 @@ def fold_predict(config, X_tr, y_fit, X_out):
         family=config.model,
         cat_features=cat_features,
         init_score=init_score_tr,
+        weight=weight,
     )
     return models.predict(model, X_out, family=config.model, cat_features=cat_features, init_score=init_score_out)
+
+
+def pseudo_label_augment(config, X_tr, y_fit, X_te, teacher_pred):
+    """Augment a fold's training rows with the teacher's test-row labels (#31).
+
+    ``teacher_pred`` must come from a model fit on this fold's own ``X_tr``/
+    ``y_fit`` only — the per-fold teacher/student split the ticket's kill
+    criterion depends on; nothing here re-derives that discipline, it only
+    consumes the prediction.
+
+    Two mechanisms, selected by whether ``config.pseudo_label_threshold`` is
+    set:
+
+    * **threshold variant** — keep only the test rows the teacher is confident
+      on (probability outside ``[1 - threshold, threshold]``), hard-label them
+      (round to 0/1), and admit them at ``config.pseudo_label_weight``.
+    * **weight variant** (``pseudo_label_threshold`` is ``None``) — keep every
+      test row, soft-labelled with the teacher's raw probability (LightGBM's
+      binary objective accepts a continuous target as a cross-entropy soft
+      label), admitted at ``config.pseudo_label_weight``.
+
+    Real rows keep weight 1.0 either way, so the pseudo-labelled rows are
+    additions to the fold, never a replacement of it.
+    """
+    import numpy as np
+    import pandas as pd
+
+    threshold = getattr(config, "pseudo_label_threshold", None)
+    weight = float(getattr(config, "pseudo_label_weight", None) or 1.0)
+    teacher_pred = np.asarray(teacher_pred, dtype=np.float64)
+
+    if threshold is not None:
+        confident = (teacher_pred >= threshold) | (teacher_pred <= 1.0 - threshold)
+        X_pl = X_te.iloc[confident].reset_index(drop=True)
+        y_pl = np.round(teacher_pred[confident])
+    else:
+        X_pl = X_te.reset_index(drop=True)
+        y_pl = teacher_pred
+
+    X_aug = pd.concat([X_tr.reset_index(drop=True), X_pl], ignore_index=True)
+    y_aug = np.concatenate([np.asarray(y_fit, dtype=np.float64), y_pl])
+    w_aug = np.concatenate(
+        [np.ones(len(y_fit), dtype=np.float64), np.full(len(y_pl), weight, dtype=np.float64)]
+    )
+    return X_aug, y_aug, w_aug
 
 
 def run(config) -> dict[str, Any]:
@@ -459,12 +510,15 @@ def run(config) -> dict[str, Any]:
     fold = data.fold_ids_for(y, config.fold_seed)
     fold_sha = data.assert_fold_partition(fold, config.fold_seed)
 
-    X_train, _X_test = frame.build_frame(train, test, config.frame)
+    X_train, X_test = frame.build_frame(train, test, config.frame)
 
     # The seed-averaged bag fits the same config once per seed and averages the
     # fold predictions; an empty bag is the single Incumbent fit at its own seed.
     seed_bag = getattr(config, "seed_bag", ()) or ()
     oversample = getattr(config, "oversample", None)
+    pseudo_label = getattr(config, "pseudo_label", False)
+    if pseudo_label and seed_bag:
+        raise ValueError("pseudo_label is not supported together with a seed bag")
 
     oof = np.zeros(len(y), dtype=np.float64)
     fold_aucs: list[float] = []
@@ -479,7 +533,19 @@ def run(config) -> dict[str, Any]:
         # resampled targets, not the original fold slice.
         y_fit = adapter.resampled_y if adapter.resampled_y is not None else y[tr_idx]
 
-        preds = fold_predict(config, X_tr, y_fit, X_va)
+        if pseudo_label:
+            # The teacher is fit on this fold's own X_tr/y_fit only — never the
+            # validation rows, never a fold-crossing view of the training set —
+            # and predicts the test rows through the same fold-fitted Adapter
+            # the Submission Fit uses (adapter.transform(X_test)). Its
+            # predictions become the pseudo-labels the student below is
+            # trained on; the student, not the teacher, produces the OOF.
+            X_te = adapter.transform(X_test)
+            teacher_pred = fold_predict(config, X_tr, y_fit, X_te)
+            X_aug, y_aug, w_aug = pseudo_label_augment(config, X_tr, y_fit, X_te, teacher_pred)
+            preds = fold_predict(config, X_aug, y_aug, X_va, weight=w_aug)
+        else:
+            preds = fold_predict(config, X_tr, y_fit, X_va)
         oof[va_idx] = preds
         fold_aucs.append(float(roc_auc_score(y[va_idx], preds)))
 
