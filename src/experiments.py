@@ -443,6 +443,215 @@ INCOME_TE_TUNED_BAG = replace(
 
 
 # --------------------------------------------------------------------------- #
+# Representation axis (#29): frequency-encoding breadth and what is left of
+# the TE axis, on evidence from #27's reading of the published stack's own
+# source. Each candidate is a single-field change (the frame spec, or
+# target_encode) against the standing Incumbent income_te_tuned. Grouped A-D
+# to match the ticket's priority groups and kill criteria.
+# --------------------------------------------------------------------------- #
+
+# Group A: frequency-encoding breadth. We count 2 columns; the published stack
+# counts ~79. Kill criterion for the group: dead only once A1, A2 and A3 have
+# ALL been measured, per the Axis rule (#27 amended ADR-0005's premise, not
+# this rule).
+COUNT_COMPOSITES = replace(
+    INCOME_TE_TUNED,
+    name="count_composites",
+    hypothesis=(
+        "Count-encoding the five composite keys the published stack itself "
+        "counts (income x subsidy, income x concern, income-per-car, charging "
+        "total, commute-per-concern) beats the Incumbent. #27 found these are "
+        "the ONLY composite keys anywhere in the published stack — as counts, "
+        "not target encodings, contradicting this project's earlier composite-"
+        "key-TE hypothesis. Single-field change against income_te_tuned: "
+        "frame = 'count_composites'. Kill criterion, declared before running: "
+        "paired delta < +0.0001 -> dead (part of Group A; the axis is not "
+        "declared dead until A1-A3 have all run)."
+    ),
+    frame="count_composites",
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+    target_oof=0.94528,
+)
+
+COUNT_ALL13 = replace(
+    INCOME_TE_TUNED,
+    name="count_all13",
+    hypothesis=(
+        "Count-encoding all 13 raw columns, not just income and commute, "
+        "beats the Incumbent. The published stack's frequency encoding covers "
+        "~79 surfaces against our 2 (+0.00112 published vs +0.00030 measured "
+        "here) -- this candidate is the direct width test. Single-field change "
+        "against income_te_tuned: frame = 'count_all13'. Kill criterion, "
+        "declared before running: paired delta < +0.0001 -> dead (Group A)."
+    ),
+    frame="count_all13",
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+    target_oof=0.94528,
+)
+
+COUNT_DIGITS = replace(
+    INCOME_TE_TUNED,
+    name="count_digits",
+    hypothesis=(
+        "Count-encoding the three income digit columns beats the Incumbent. "
+        "The published stack's frequency encoding is applied to digit columns "
+        "too (56 of its ~79 surfaces are digits); this measures whether that "
+        "specific slice pays here. Single-field change against income_te_tuned: "
+        "frame = 'count_digits'. Kill criterion, declared before running: "
+        "paired delta < +0.0001 -> dead (Group A)."
+    ),
+    frame="count_digits",
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+    target_oof=0.94528,
+)
+
+COUNT_ALL13_COMPOSITES = replace(
+    INCOME_TE_TUNED,
+    name="count_all13_composites",
+    hypothesis=(
+        "count_all13 and count_composites stack. Run ONLY if both land "
+        "individually -- see #29. Single-field change against income_te_tuned: "
+        "frame = 'count_all13_composites'. Kill criterion, declared before "
+        "running: paired delta < +0.0003 -> the stack does not pay and the "
+        "better of the two stands alone."
+    ),
+    frame="count_all13_composites",
+    incumbent="income_te_tuned",
+    kill_delta=0.0003,
+    target_oof=0.94528,
+)
+
+# Group B: what is left of the target-encoding axis after #27. Kill criterion
+# for the group: dead after B1 and B3 -- #27 established our one-column TE
+# already banks nearly the whole published TE step, so triple-smoothing
+# variants (B2/B4) do not earn their runs unless one of these two lands.
+COMMUTE_TE = replace(
+    INCOME_TE_TUNED,
+    name="commute_te",
+    hypothesis=(
+        "Target-encoding Daily_Commute_km, found non-monotone and worth ~6pp "
+        "inside every score decile (#5) and never target-encoded here, beats "
+        "the Incumbent. Single-field change against income_te_tuned: "
+        "target_encode = (Annual_Income_USD, Daily_Commute_km). Kill "
+        "criterion, declared before running: paired delta < +0.0001 -> dead "
+        "(Group B)."
+    ),
+    target_encode=("Annual_Income_USD", "Daily_Commute_km"),
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+    target_oof=0.94528,
+)
+
+# The seven columns the published stack's own source target-encodes (#27):
+# Age, income, commute, cars owned, both charging-station counts, concern.
+TE_SEVEN_COLUMNS: tuple[str, ...] = (
+    "Annual_Income_USD",
+    "Age",
+    "Daily_Commute_km",
+    "Number_of_Cars_Owned",
+    "Charging_Stations_Near_Home",
+    "Charging_Stations_Near_Work",
+    "Environmental_Concern_Level",
+)
+
+TE_SEVEN = replace(
+    INCOME_TE_TUNED,
+    name="te_seven",
+    hypothesis=(
+        "Target-encoding the same seven columns the published stack's own "
+        "source encodes, at our prior weight of 20, beats the Incumbent. "
+        "age_te alone already measured +0.00001 (dead) -- this tests whether "
+        "the other five columns carry what age_te alone did not. Single-field "
+        "change against income_te_tuned: target_encode = the seven columns. "
+        "Kill criterion, declared before running: paired delta < +0.0001 -> "
+        "dead (Group B)."
+    ),
+    target_encode=TE_SEVEN_COLUMNS,
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+    target_oof=0.94528,
+)
+
+# Group C: the two composite-key target encodings #27's own source contradicts
+# (a published composite-key TE measured -0.0004) -- run to put the number on
+# our own record rather than leave it as folklore. Both run regardless of
+# result, per #29.
+TE_INCOME_X_SUBSIDY = replace(
+    INCOME_TE_TUNED,
+    name="te_income_x_subsidy",
+    hypothesis=(
+        "Target-encoding the composite key income x subsidy beats the "
+        "Incumbent. Declared prior: negative -- #27 found the published stack "
+        "uses no composite-key TE anywhere (only as counts), and a published "
+        "composite-key TE measured -0.0004. Single-field change against "
+        "income_te_tuned: frame = 'composite_te_keys', target_encode = "
+        "(Annual_Income_USD, income_x_subsidy). Kill criterion, declared "
+        "before running: paired delta < +0.0001 -> dead. Runs regardless of "
+        "result, to put the number on this project's own record."
+    ),
+    frame="composite_te_keys",
+    target_encode=("Annual_Income_USD", "income_x_subsidy"),
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+    target_oof=0.94528,
+)
+
+TE_INCOME_X_CITY = replace(
+    INCOME_TE_TUNED,
+    name="te_income_x_city",
+    hypothesis=(
+        "Target-encoding the composite key income x city beats the Incumbent. "
+        "Same declared-negative prior as te_income_x_subsidy. Single-field "
+        "change against income_te_tuned: frame = 'composite_te_keys', "
+        "target_encode = (Annual_Income_USD, income_x_city). Kill criterion, "
+        "declared before running: paired delta < +0.0001 -> dead. Runs "
+        "regardless of result."
+    ),
+    frame="composite_te_keys",
+    target_encode=("Annual_Income_USD", "income_x_city"),
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+    target_oof=0.94528,
+)
+
+# Group D: digit decomposition of the six numeric columns income's own digits
+# do not cover. Lowest expected value on the axis -- these are already
+# low-cardinality and fully addressable raw, unlike income.
+DIGITS7 = replace(
+    INCOME_TE_TUNED,
+    name="digits7",
+    hypothesis=(
+        "Units/tens digit decomposition of Age, commute, cars owned, both "
+        "charging-station counts and concern beats the Incumbent. Expected "
+        "close to a no-op: unlike income, these columns are already "
+        "low-cardinality and fully addressable raw, so a tree already has "
+        "individual-value resolution on them without decomposition. "
+        "Single-field change against income_te_tuned: frame = 'digits7'. Kill "
+        "criterion, declared before running: paired delta < +0.0001 -> dead."
+    ),
+    frame="digits7",
+    incumbent="income_te_tuned",
+    kill_delta=0.0001,
+    target_oof=0.94528,
+)
+
+# The representation axis (#29), in the ticket's declared priority order.
+REPRESENTATION_AXIS: tuple[Experiment, ...] = (
+    COUNT_COMPOSITES,
+    COUNT_ALL13,
+    COUNT_DIGITS,
+    COMMUTE_TE,
+    TE_SEVEN,
+    TE_INCOME_X_SUBSIDY,
+    TE_INCOME_X_CITY,
+    DIGITS7,
+)
+
+
+# --------------------------------------------------------------------------- #
 # The band (ii) experiment queue, in its declared order (#12, PRD #12).
 # --------------------------------------------------------------------------- #
 # Story 62: the queue is run in its declared order, so the candidate with a
@@ -490,6 +699,8 @@ _REGISTRY: dict[str, Experiment] = {
     INCOME_TE_TUNED.name: INCOME_TE_TUNED,
     INCOME_TE_TUNED_BAG.name: INCOME_TE_TUNED_BAG,
     **{exp.name: exp for exp in MAX_BIN_EXPERIMENTS},
+    **{exp.name: exp for exp in REPRESENTATION_AXIS},
+    COUNT_ALL13_COMPOSITES.name: COUNT_ALL13_COMPOSITES,
 }
 
 
