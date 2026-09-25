@@ -379,14 +379,18 @@ def fold_predict(config, X_tr, y_fit, X_out):
                     y_fit,
                     experiments_mod.seeded_params(config.params, s),
                     num_boost_round=config.num_boost_round,
+                    family=config.model,
                 ),
                 X_out,
+                family=config.model,
             )
             for s in seed_bag
         ]
         return np.mean(np.asarray(member_preds), axis=0)
-    model = models.fit(X_tr, y_fit, config.params, num_boost_round=config.num_boost_round)
-    return models.predict(model, X_out)
+    model = models.fit(
+        X_tr, y_fit, config.params, num_boost_round=config.num_boost_round, family=config.model
+    )
+    return models.predict(model, X_out, family=config.model)
 
 
 def run(config) -> dict[str, Any]:

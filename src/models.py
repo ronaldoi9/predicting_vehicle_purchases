@@ -1,4 +1,4 @@
-"""Model families behind one signature. Turn 1 is LightGBM only.
+"""Model families behind one signature. Turn 2 (#24) adds XGBoost as a second.
 
 Comparison Runs use a **fixed round count with early stopping disabled** —
 early stopping on the evaluated fold biases OOF upward and breaks the pairing.
@@ -6,8 +6,11 @@ Early stopping is permitted only in the Submission Fit, which lives elsewhere.
 
 An assert binds ``max_bin`` from below against the ``Age`` value count, so a
 parameter change cannot violate the representation invariant that all 45 ages
-stay individually addressable. lightgbm is imported lazily so the module
-imports by bare name anywhere.
+stay individually addressable — checked for every family, not just LightGBM.
+Each family's library is imported lazily inside :func:`fit`/:func:`predict` so
+the module imports by bare name anywhere, and ``fit``/``predict`` dispatch on
+an explicit ``family`` argument rather than inspecting ``params`` — the caller
+(an :class:`experiments.Experiment`) already knows its family in ``.model``.
 """
 
 from __future__ import annotations
@@ -35,30 +38,47 @@ def needs_scaling(family: str) -> bool:
     return family not in TREE_FAMILIES
 
 
-def fit(X, y, params: Mapping[str, Any], num_boost_round: int = 700):
-    """Fit one model family on ``X``/``y`` under ``params`` for fixed rounds.
-
-    Turn 1 is LightGBM. No validation set is passed and no early stopping is
-    used, so the model cannot peek at the fold it is scored on.
-    """
-    import lightgbm as lgb
-
-    max_bin = int(params.get("max_bin", 255))
+def _assert_max_bin(params: Mapping[str, Any], default: int) -> int:
+    max_bin = int(params.get("max_bin", default))
     if max_bin < MIN_MAX_BIN:
         raise AssertionError(
             f"max_bin={max_bin} < {MIN_MAX_BIN}: too coarse to address the 45 "
             "distinct Age values the representation depends on"
         )
-
-    dtrain = lgb.Dataset(X, label=y, free_raw_data=False)
-    booster = lgb.train(
-        dict(params),
-        dtrain,
-        num_boost_round=num_boost_round,
-    )
-    return booster
+    return max_bin
 
 
-def predict(model, X):
+def fit(X, y, params: Mapping[str, Any], num_boost_round: int = 700, family: str = "lightgbm"):
+    """Fit one model family on ``X``/``y`` under ``params`` for fixed rounds.
+
+    No validation set is passed and no early stopping is used for any family,
+    so the model cannot peek at the fold it is scored on.
+    """
+    if family == "lightgbm":
+        import lightgbm as lgb
+
+        _assert_max_bin(params, default=255)
+        dtrain = lgb.Dataset(X, label=y, free_raw_data=False)
+        return lgb.train(dict(params), dtrain, num_boost_round=num_boost_round)
+
+    if family == "xgboost":
+        import xgboost as xgb
+
+        # xgboost's own default max_bin (256) already clears MIN_MAX_BIN, but
+        # the assert stays explicit rather than assumed, same as lightgbm.
+        _assert_max_bin(params, default=256)
+        dtrain = xgb.DMatrix(X, label=y)
+        return xgb.train(dict(params), dtrain, num_boost_round=num_boost_round)
+
+    raise ValueError(f"unknown model family {family!r}; models.fit supports lightgbm, xgboost")
+
+
+def predict(model, X, family: str = "lightgbm"):
     """Probability predictions for the positive class."""
-    return model.predict(X)
+    if family == "lightgbm":
+        return model.predict(X)
+    if family == "xgboost":
+        import xgboost as xgb
+
+        return model.predict(xgb.DMatrix(X))
+    raise ValueError(f"unknown model family {family!r}; models.predict supports lightgbm, xgboost")

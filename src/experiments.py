@@ -652,6 +652,104 @@ REPRESENTATION_AXIS: tuple[Experiment, ...] = (
 
 
 # --------------------------------------------------------------------------- #
+# XGBoost as a second Arena family (#24, turn 2). Not a Paired-Delta candidate
+# against income_te_tuned — a parallel Incumbent chain on the same Frame (the
+# Baseline Frame plus the income target encoding, so both families are scored
+# on identical rows). ``incumbent`` still points at income_te_tuned so each run
+# gets a Paired Delta printed for readability, but the family's own kill
+# criterion (#24) is judged on absolute OOF across all three configs together,
+# not per-run: dead only if all three land below OOF 0.9445 (>0.0008 behind
+# the standing Incumbent). That aggregate judgement is made once all three
+# have run, not encoded as a per-run kill_delta.
+#
+# Pinned for determinism the same way LGBM_PARAMS is: tree_method=hist (the
+# only method that takes max_bin, keeping the Age-resolution invariant
+# expressible), nthread on the ten performance cores, one explicit seed.
+XGB_BASE_PARAMS: dict[str, Any] = {
+    "objective": "binary:logistic",
+    "eval_metric": "auc",
+    "tree_method": "hist",
+    "max_bin": 511,
+    "nthread": 10,
+    "seed": 0,
+    "verbosity": 0,
+}
+
+# Three distinct configurations, not one port of LightGBM's parameters (#24's
+# own kill criterion excludes that): idiomatic depth-wise XGBoost defaults,
+# LightGBM-style leaf-wise growth (a genuine cross-library hypothesis, not a
+# parameter port — XGBoost's lossguide implementation differs internally),
+# and a deeper regularised depth-wise tree.
+XGBOOST_BASELINE = replace(
+    BASELINE,
+    name="xgboost_baseline",
+    hypothesis=(
+        "XGBoost, fit with idiomatic depth-wise defaults (max_depth=6, "
+        "eta=0.05, subsample/colsample_bytree=0.8) on the same Frame as the "
+        "standing Incumbent (baseline + income target encoding), opens its own "
+        "Arena chain. This is the family's first reproduction number, not a "
+        "port of LightGBM's leaf-wise parameters. incumbent points at "
+        "income_te_tuned so a Paired Delta prints, but survival is judged on "
+        "absolute OOF across all three declared configs (#24): dead only if "
+        "all three land below 0.9445."
+    ),
+    model="xgboost",
+    target_encode=("Annual_Income_USD",),
+    params={**XGB_BASE_PARAMS, "max_depth": 6, "eta": 0.05, "subsample": 0.8, "colsample_bytree": 0.8},
+    incumbent="income_te_tuned",
+    target_oof=0.94528,
+)
+
+XGBOOST_LOSSGUIDE = replace(
+    XGBOOST_BASELINE,
+    name="xgboost_lossguide",
+    hypothesis=(
+        "XGBoost with grow_policy=lossguide, max_leaves=127 and max_depth=0 "
+        "(unlimited -- lossguide is meant to be leaf-bounded, not depth-bounded; "
+        "xgboost's max_depth default of 6 would otherwise silently cap it to "
+        "depth-wise's own shape) -- leaf-wise growth, LightGBM's default shape, "
+        "under XGBoost's own histogram implementation -- beats xgboost_baseline's "
+        "depth-wise growth on this Frame. A genuine hypothesis about growth "
+        "policy, not a parameter port: the two libraries' lossguide/leaf-wise "
+        "splitters differ internally. One of the family's three declared "
+        "configs (#24)."
+    ),
+    params={
+        **XGB_BASE_PARAMS,
+        "grow_policy": "lossguide",
+        "max_leaves": 127,
+        "max_depth": 0,
+        "eta": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+    },
+)
+
+XGBOOST_TUNED = replace(
+    XGBOOST_BASELINE,
+    name="xgboost_tuned",
+    hypothesis=(
+        "A deeper, regularised depth-wise XGBoost tree (max_depth=10, "
+        "min_child_weight=5, lambda=1.0) trades depth for regularisation "
+        "instead of chasing LightGBM's leaf count. Third of the family's three "
+        "declared configs (#24) — the aggregate kill criterion (all three "
+        "below OOF 0.9445) is judged once this one has run too."
+    ),
+    params={
+        **XGB_BASE_PARAMS,
+        "max_depth": 10,
+        "min_child_weight": 5,
+        "lambda": 1.0,
+        "eta": 0.05,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+    },
+)
+
+XGBOOST_ARENA: tuple[Experiment, ...] = (XGBOOST_BASELINE, XGBOOST_LOSSGUIDE, XGBOOST_TUNED)
+
+
+# --------------------------------------------------------------------------- #
 # The band (ii) experiment queue, in its declared order (#12, PRD #12).
 # --------------------------------------------------------------------------- #
 # Story 62: the queue is run in its declared order, so the candidate with a
@@ -701,6 +799,7 @@ _REGISTRY: dict[str, Experiment] = {
     **{exp.name: exp for exp in MAX_BIN_EXPERIMENTS},
     **{exp.name: exp for exp in REPRESENTATION_AXIS},
     COUNT_ALL13_COMPOSITES.name: COUNT_ALL13_COMPOSITES,
+    **{exp.name: exp for exp in XGBOOST_ARENA},
 }
 
 
