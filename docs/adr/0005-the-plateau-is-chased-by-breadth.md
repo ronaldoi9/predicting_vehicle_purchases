@@ -1,5 +1,7 @@
 # The remaining gap below the Plateau is chased by breadth, not by one family
 
+> **Amended by [ADR-0006](0006-turn-3-reopens-on-published-anchors.md)**: the finals rule gains a Proven Final clause, and promotion may proceed by recorded override. Everything else stands.
+
 Turn 1 ended at OOF 0.94528 / LB 0.94560 — roughly **0.0011 short of the Plateau** and of the 0.9466–0.94672 band where ranks 3–20 sit. Turn 2 spends the remaining budget closing that distance by **widening the Arena**: more model families, a measured Blend, the published representation gains we never implemented, and a real hyperparameter search. The destination is a **Confirmation Run at OOF ≥ 0.9464** with the CV→LB Offset still stable, which the measured Offset of +0.00032 projects to LB ~0.9467.
 
 Turn 1's single-family, single-field discipline was the right instrument for building a trustworthy measurement and the wrong one for finding score: six of the seven axes with published gains were never touched, and one of them — a plain logistic regression another team reports at CV 0.94640 — already sits above our Incumbent.

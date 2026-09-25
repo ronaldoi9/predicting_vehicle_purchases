@@ -76,6 +76,10 @@ _Avoid_: public overfitting, LB probing, luck
 The submission protected regardless of how the remaining experiments go — the one that would be selected if every hypothesis died. Defined by simplicity and by a date it must exist by, never by being the best result.
 _Avoid_: fallback, safe submission, baseline submission
 
+**Proven Final**:
+A final submission whose every code path has already produced a scored submission in an earlier turn. Defined by the provenance of its code, never by its score — it guards against a bug the current turn introduced, which CV cannot see.
+_Avoid_: safe final, fallback final (both collide with the Floor)
+
 **Recipe**:
 The publicly reverse-engineered generating rule behind the synthetic data — a linear `buy_score` with a threshold. A fact about the data's origin, not a usable model; it scores well under the Plateau.
 _Avoid_: the formula, the generator, ground truth
