@@ -26,9 +26,16 @@ from blend import BlendConfig
 # stacked follow-up, explicitly gated behind both of its parents landing
 # individually — they did not, so it was never run and stays unrun.
 # ``heuljax_tracer`` (#37) is a tracer bullet for a family whose full port is
-# still to come; turn 3's Blend (T3) declares its own Members instead.
+# still to come; turn 3's Blend (T3) declares its own Members instead. The
+# same holds for #39's two stacked-TE configurations: turn-3 candidates, not
+# retroactive Members of a Blend turn 2 already ran.
 _EXCLUDED_FROM_ALL_MEMBERS = frozenset(
-    {"tracer_raw13", "count_all13_composites", "heuljax_tracer"}
+    {
+        "tracer_raw13",
+        "count_all13_composites",
+        "heuljax_tracer",
+        *(exp.name for exp in experiments.TE_KEYS_AXIS),
+    }
 )
 
 BLEND_ALL_MEMBERS = BlendConfig(

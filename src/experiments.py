@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from adapter import PRIOR_WEIGHT
+
 # Turn 1's LightGBM parameters, taken verbatim from the leak hunt's ablation so
 # the first number the pipeline produces is a reproduction that can be checked.
 # Determinism is part of the instrument: performance cores only, deterministic
@@ -76,6 +78,14 @@ class Experiment:
     # training fold. Empty for the Incumbent; a candidate adds exactly this one
     # field, so the one-change discipline is visible in the declaration itself.
     target_encode: tuple[str, ...] = ()
+    # The stacked income/commute TE (#39, ADR-0006 §1): the smoothing prior
+    # weight for every encoding above and below, and the derived keys -- each a
+    # (source column, derivation) pair with derivation one of
+    # ``adapter.TE_DERIVATIONS`` -- encoded under the same Nested Cross-Fit.
+    # Left at their defaults they are omitted from ``as_config``, so every
+    # earlier declaration keeps its config hash.
+    te_prior_weight: float = PRIOR_WEIGHT
+    te_derived_keys: tuple[tuple[str, str], ...] = ()
     # The Incumbent this candidate is a Paired Delta against, and the kill
     # criterion declared *before* it runs (a mean paired delta below this on the
     # canonical seed kills the candidate). Both ``None`` for the Incumbent runs.
@@ -151,7 +161,7 @@ class Experiment:
         config hash); the Incumbent pointer and kill criterion are recorded on
         the Run Record, not here, so they do not perturb "have I tried this?".
         """
-        return {
+        config = {
             "name": self.name,
             "frame": self.frame,
             "model": self.model,
@@ -172,6 +182,11 @@ class Experiment:
             "pseudo_label_weight": self.pseudo_label_weight,
             "params": dict(self.params),
         }
+        if self.te_prior_weight != PRIOR_WEIGHT:
+            config["te_prior_weight"] = self.te_prior_weight
+        if self.te_derived_keys:
+            config["te_derived_keys"] = [list(k) for k in self.te_derived_keys]
+        return config
 
 
 TRACER_RAW13 = Experiment(
@@ -1244,6 +1259,71 @@ HEULJAX_TRACER = replace(
 
 
 # --------------------------------------------------------------------------- #
+# The stacked income/commute TE (#39, ADR-0006 §1): Maldonado's multi-key
+# target encoding, measured as one stacked candidate against the turn-3
+# Incumbent hpsearch_lightgbm_best_confirm, on its frozen LightGBM params and
+# 2,341 rounds. Exact income and commute plus the income ``//100`` and
+# ``//1000`` keys and ``floor(commute)``, all under the Adapter's Nested
+# Cross-Fit, at a light prior. Two configurations (prior 1 and prior 5); the
+# Axis is dead only if both fail. No ablation follows a win: the stack enters
+# whole. Published anchor: pooled OOF 0.94603, self-reported parts prior
+# 20 -> 1 +0.00025 and coarse keys +0.00012, neither measured on a Frame that
+# already carries income digits (docs/research/income-te-keys-and-published-
+# pipelines.md), so either may shrink to zero here.
+# --------------------------------------------------------------------------- #
+TE_KEYS_DERIVED: tuple[tuple[str, str], ...] = (
+    ("Annual_Income_USD", "div100"),
+    ("Annual_Income_USD", "div1000"),
+    ("Daily_Commute_km", "floor"),
+)
+
+TE_KEYS_KILL_CRITERION = (
+    "Kill criterion, declared before running: the staggered rule on the "
+    "canonical seed -- a paired delta >= +0.0003 is accepted; one in "
+    "[+0.0001, +0.0003) needs a Confirmation Run; below +0.0001 it is dead; "
+    "and whatever its size it must be positive in 4 of 5 folds. The Axis is "
+    "dead if both configurations (prior 1 and prior 5) fail."
+)
+
+TE_KEYS_PRIOR1 = replace(
+    HPSEARCH_LIGHTGBM_BEST_CONFIRM,
+    name="te_keys_prior1",
+    hypothesis=(
+        "Maldonado's stacked target encoding -- exact income, income //100 and "
+        "//1000, exact commute and floor(commute), each under the Adapter's "
+        "Nested Cross-Fit at prior weight 1 instead of 20 -- beats the "
+        "Incumbent hpsearch_lightgbm_best_confirm on its own params and 2,341 "
+        "rounds. Published at pooled OOF 0.94603 (prior 20 -> 1 +0.00025, "
+        "coarse keys +0.00012, both self-reported and never measured on a Frame "
+        "that already carries income digits). Change against the Incumbent: "
+        "target_encode adds Daily_Commute_km, te_derived_keys adds the three "
+        "coarse keys, te_prior_weight = 1. " + TE_KEYS_KILL_CRITERION
+    ),
+    target_encode=("Annual_Income_USD", "Daily_Commute_km"),
+    te_derived_keys=TE_KEYS_DERIVED,
+    te_prior_weight=1.0,
+    incumbent="hpsearch_lightgbm_best_confirm",
+    kill_delta=0.0001,
+    target_oof=0.94557,
+)
+
+TE_KEYS_PRIOR5 = replace(
+    TE_KEYS_PRIOR1,
+    name="te_keys_prior5",
+    hypothesis=(
+        "The same stacked target encoding as te_keys_prior1 at prior weight 5: "
+        "a light prior still, but one that pulls the thin //100 keys and "
+        "single-row exact incomes further toward the fold prior than 1 does. "
+        "Second of the Axis's two declared configurations. "
+        + TE_KEYS_KILL_CRITERION
+    ),
+    te_prior_weight=5.0,
+)
+
+TE_KEYS_AXIS: tuple[Experiment, ...] = (TE_KEYS_PRIOR1, TE_KEYS_PRIOR5)
+
+
+# --------------------------------------------------------------------------- #
 # The band (ii) experiment queue, in its declared order (#12, PRD #12).
 # --------------------------------------------------------------------------- #
 # Story 62: the queue is run in its declared order, so the candidate with a
@@ -1302,6 +1382,7 @@ _REGISTRY: dict[str, Experiment] = {
     **{exp.name: exp for exp in LINEAR_ARENA},
     **{exp.name: exp for exp in PSEUDO_LABEL_ARENA},
     HEULJAX_TRACER.name: HEULJAX_TRACER,
+    **{exp.name: exp for exp in TE_KEYS_AXIS},
 }
 
 

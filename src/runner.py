@@ -382,6 +382,8 @@ def fold_adapter(config, outer_fold: int, validation_index):
         validation_index=set(validation_index),
         scale_columns=scale_columns,
         scale_exclude=tuple(name for name, _ in frame.INCOME_DIGIT_TRANSFORMS),
+        prior_weight=getattr(config, "te_prior_weight", adapter_mod.PRIOR_WEIGHT),
+        derived_keys=getattr(config, "te_derived_keys", ()),
         oversample=oversample,
         oversample_continuous_columns=(
             (frame.INCOME_COLUMN,) + tuple(n for n, _ in frame.INCOME_DIGIT_TRANSFORMS)

@@ -46,6 +46,32 @@ PRIOR_WEIGHT = 20.0  # additive-smoothing prior weight
 # raw value, so income stays individually addressable alongside its encoding.
 TE_SUFFIX = "_te"
 
+# Derived TE keys (#39, ADR-0006 §1): coarser keys on a source column, each
+# target-encoded under the same Nested Cross-Fit and smoothed mean as the
+# exact value. Computed from the original, unscaled values -- the ordering
+# ADR-0001 fixes for income digits -- which holds here because scaling is the
+# last step of ``fit_transform``/``transform``, after every encoding.
+TE_DERIVATIONS = ("div100", "div1000", "floor")
+
+
+def derive_key(values, derivation: str):
+    """The derived key of each value: ``//100``, ``//1000`` or ``floor``."""
+    import numpy as np
+
+    values = np.asarray(values)
+    if derivation == "div100":
+        return values // 100
+    if derivation == "div1000":
+        return values // 1000
+    if derivation == "floor":
+        return np.floor(values)
+    raise ValueError(f"unknown TE key derivation {derivation!r}; known: {TE_DERIVATIONS}")
+
+
+def derived_te_column(source: str, derivation: str) -> str:
+    """The column a derived key's encoding lands in, e.g. ``Annual_Income_USD_div100_te``."""
+    return f"{source}_{derivation}{TE_SUFFIX}"
+
 # Oversampling (#19). Only the categorical-aware SMOTENC is permitted, and it is
 # fitted strictly inside the training fold. Plain ``SMOTE`` is excluded outright:
 # interpolating Age to 43.7 and producing income digits that no longer derive
@@ -324,6 +350,7 @@ class Adapter:
         scale_columns: Sequence[str] = (),
         scale_exclude: Sequence[str] = (),
         prior_weight: float = PRIOR_WEIGHT,
+        derived_keys: Sequence[tuple[str, str]] = (),
         inner_splits: int = INNER_SPLITS,
         oversample: str | None = None,
         oversample_continuous_columns: Sequence[str] = (),
@@ -346,8 +373,13 @@ class Adapter:
             "digits that no longer derive from their own income destroys "
             f"Resolution — use SMOTENC. Got {oversample!r}."
         )
+        for _, derivation in derived_keys:
+            assert derivation in TE_DERIVATIONS, (
+                f"unknown TE key derivation {derivation!r}; known: {TE_DERIVATIONS}"
+            )
         self.scale = scale
         self.target_encode = tuple(target_encode)
+        self.derived_keys = tuple((str(src), str(d)) for src, d in derived_keys)
         self.outer_fold = outer_fold
         self.validation_index = None if validation_index is None else set(validation_index)
         self.scale_columns = tuple(scale_columns)
@@ -370,8 +402,8 @@ class Adapter:
         self._columns = None  # input column layout captured at fit
         self._scaler = None
         self._scale_cols = None
-        self._te_maps: dict[str, dict] = {}  # col -> {key: full-training encoding}
-        self._te_priors: dict[str, float] = {}  # col -> full-training fold prior
+        self._te_maps: dict[str, dict] = {}  # TE column -> {key: full-training encoding}
+        self._te_priors: dict[str, float] = {}  # TE column -> full-training fold prior
         self._recipe_calibration: tuple[float, float] | None = None  # (intercept, coef)
         self._fitted_margin_state: dict | None = None
 
@@ -402,7 +434,7 @@ class Adapter:
             out, y_work = self._oversample(out, y_work)
             self.resampled_y = y_work
 
-        if self.target_encode:
+        if self.target_encode or self.derived_keys:
             out = self._encode_training_rows(out, y_work)
 
         if self.recipe_margin:
@@ -464,7 +496,7 @@ class Adapter:
             raise AssertionError("Adapter.transform got a different column layout than fit")
 
         out = X_va
-        if self.target_encode:
+        if self.target_encode or self.derived_keys:
             out = self._apply_full_encoding(X_va)
         if self.recipe_margin:
             out = self._apply_recipe_margin(out)
@@ -475,6 +507,14 @@ class Adapter:
         return self._apply_scale(out)
 
     # ---- target encoding --------------------------------------------------- #
+    def _te_keys(self, X):
+        """Each encoding's output column and its key per row: the exact values
+        of ``target_encode``, then each derived key from its source column."""
+        for col in self.target_encode:
+            yield col + TE_SUFFIX, X[col].to_numpy()
+        for source, derivation in self.derived_keys:
+            yield derived_te_column(source, derivation), derive_key(X[source].to_numpy(), derivation)
+
     def _encode_training_rows(self, X_tr, y_tr):
         """Add each TE column to the training rows via nested cross-fit, and
         fit the full-training encoding (used for the validation/test rows)."""
@@ -482,12 +522,11 @@ class Adapter:
 
         y = np.asarray(y_tr, dtype=np.float64)
         out = X_tr.copy()
-        for col in self.target_encode:
-            keys = X_tr[col].to_numpy()
+        for te_col, keys in self._te_keys(X_tr):
             # The full-training encoding, for transform() of held-out rows.
-            self._te_maps[col], self._te_priors[col] = self._full_encoding(keys, y)
+            self._te_maps[te_col], self._te_priors[te_col] = self._full_encoding(keys, y)
             # The training rows themselves get the out-of-inner-fold values.
-            out[col + TE_SUFFIX] = self._nested_cross_fit(keys, y)
+            out[te_col] = self._nested_cross_fit(keys, y)
         return out
 
     def _full_encoding(self, keys, y):
@@ -529,11 +568,13 @@ class Adapter:
         return enc
 
     def _apply_full_encoding(self, X):
+        import pandas as pd
+
         out = X.copy()
-        for col in self.target_encode:
-            mapping = self._te_maps[col]
-            prior = self._te_priors[col]
-            out[col + TE_SUFFIX] = X[col].map(mapping).fillna(prior)
+        for te_col, keys in self._te_keys(X):
+            mapping = self._te_maps[te_col]
+            prior = self._te_priors[te_col]
+            out[te_col] = pd.Series(keys, index=X.index).map(mapping).fillna(prior)
         return out
 
     # ---- the Recipe margin (#28) -------------------------------------------- #
