@@ -343,3 +343,34 @@ def test_declared_blend_all_members_resolves_against_the_real_ledger() -> None:
         return  # SKIP: the gitignored ledger/oof files are absent
     assert len(records) == len(blends.BLEND_ALL_MEMBERS.members)
     assert blend.best_member_record(records) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Turn 3's Blend (#41): the Incumbent plus the turn-3 survivors, resolved on
+# every Confirmation seed so its Confirmation Run is armed before it runs.
+# --------------------------------------------------------------------------- #
+def test_turn3_blend_is_the_incumbent_plus_the_turn3_survivors() -> None:
+    import blends
+
+    config = blends.resolve("blend_turn3")
+    # The Incumbent (te_keys_prior5, promoted in #39) first, then #40's Member.
+    assert config.members == ("te_keys_prior5", "heuljax_full")
+    # The kill criterion is the one already declared, not a new one.
+    assert config.kill_delta == blends.BLEND_ALL_MEMBERS.kill_delta
+    assert (
+        config.kill_min_folds_positive
+        == blends.BLEND_ALL_MEMBERS.kill_min_folds_positive
+    )
+
+
+def test_turn3_blend_resolves_on_every_confirmation_seed() -> None:
+    from dataclasses import replace
+
+    import blends
+    import verdict
+
+    for seed in verdict.CONFIRMATION_SEEDS:
+        config = replace(blends.BLEND_TURN3, fold_seed=seed)
+        records = blend.resolve_members(config)
+        assert [r["experiment"] for r in records] == list(config.members)
+        assert all(r["config"]["fold_seed"] == seed for r in records)

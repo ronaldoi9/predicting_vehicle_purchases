@@ -59,8 +59,33 @@ BLEND_ALL_MEMBERS = BlendConfig(
     kill_min_folds_positive=4,
 )
 
+# Turn 3's Blend (#41). The Incumbent is te_keys_prior5 (#39's stacked TE,
+# promoted), so it is both the Incumbent and #39's survivor; heuljax_full (#40)
+# passed its Member gate on seeds 0/1/2. Nothing else: the older Arena chains
+# already had their Blend in turn 2, and ADR-0006 scopes turn 3 to its two
+# published anchors. The Incumbent is listed first so a per-round hill-climb
+# tie picks it.
+BLEND_TURN3 = BlendConfig(
+    name="blend_turn3",
+    hypothesis=(
+        "Rank-averaging the Incumbent te_keys_prior5 with heuljax_full, the "
+        "first Member with a genuinely different representation (173 "
+        "features, XGBoost), with weights chosen by greedy hill-climb under "
+        "per-outer-fold nested weight selection, beats the better of the two. "
+        "The OOF correlation of the pair is 0.998, so the room is small. Kill "
+        "criterion, declared before running and unchanged from the turn-2 "
+        "Blend: paired delta vs best Member < +0.0003, or positive in fewer "
+        "than 4/5 folds -> dead."
+    ),
+    members=("te_keys_prior5", "heuljax_full"),
+    fold_seed=0,
+    kill_delta=BLEND_ALL_MEMBERS.kill_delta,
+    kill_min_folds_positive=BLEND_ALL_MEMBERS.kill_min_folds_positive,
+)
+
 REGISTRY: Mapping[str, BlendConfig] = {
     BLEND_ALL_MEMBERS.name: BLEND_ALL_MEMBERS,
+    BLEND_TURN3.name: BLEND_TURN3,
 }
 
 
