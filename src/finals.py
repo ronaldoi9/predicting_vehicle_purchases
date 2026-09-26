@@ -4,10 +4,11 @@ Band (iii) is the freeze. **Nothing new enters once this ticket begins**, so its
 work is three decisions taken against what the ledger already holds — not new
 measurement — and every one of them is pure and lives here:
 
-* **The freeze itself** (:func:`assert_no_new_candidate`): every experiment in
-  the runs ledger must be one already declared in :mod:`experiments`. A candidate
-  introduced after the freeze begins fails loudly rather than quietly entering
-  the selection.
+* **The freeze itself**: turn 1's (:func:`assert_no_new_candidate`) required
+  every ledger experiment to be declared in :mod:`experiments`; turn 3's
+  (:func:`assert_nothing_after_freeze`, the one the CLI asserts) refuses any Run
+  Record timestamped after 29/09 23:59 BRT. Either fails loudly rather than
+  letting a late candidate slide into the selection.
 
 * **Turn 1's two finals = best CV + the Floor** (:func:`select_finals`), kept
   as the record of that turn's rule; the CLI applies the Proven Final clause
@@ -91,6 +92,34 @@ def assert_no_new_candidate(
             "the freeze is broken — these experiments are in the ledger but were "
             f"never declared (a new candidate after band (iii) began): "
             f"{', '.join(intruders)}. Nothing new enters once this ticket begins."
+        )
+
+
+# Turn 3's freeze (ADR-0006): 2026-09-29 23:59 BRT (UTC-3). From then on only
+# the finals are selected; no Comparison or Confirmation Run is recorded.
+TURN3_FREEZE = datetime(2026, 9, 30, 3, 0, tzinfo=timezone.utc)
+
+
+def assert_nothing_after_freeze(
+    records: Sequence[Mapping[str, Any]],
+    freeze: datetime = TURN3_FREEZE,
+) -> None:
+    """Enforce turn 3's freeze: no Run Record may be timestamped at or after it.
+
+    Turn 1 froze on the declared registry (:func:`assert_no_new_candidate`);
+    turn 3 freezes on a date, because the hp-search trials and the Blends are
+    legitimate ledger entries that were never registry declarations.
+    """
+    late = [
+        str(r.get("run_id"))
+        for r in records
+        if r.get("timestamp") and datetime.fromisoformat(str(r["timestamp"])) >= freeze
+    ]
+    if late:
+        raise ValueError(
+            f"the freeze is broken — these runs were recorded at or after "
+            f"{freeze.isoformat()}: {', '.join(late)}. After the freeze only the "
+            "finals are selected (ADR-0006)."
         )
 
 
@@ -444,11 +473,10 @@ def main(argv: list[str] | None = None) -> int:
     records = runner.load_records(args.runs_ledger)
     subs = submission.load_submissions(args.submissions_ledger)
 
-    # The freeze is asserted first: a new candidate in the ledger breaks band
-    # (iii)'s premise before any final is chosen.
-    assert_no_new_candidate(records)
-
+    # The freeze is asserted first: a run recorded after it breaks the premise
+    # that only the finals are selected from then on.
     try:
+        assert_nothing_after_freeze(records)
         selection = select_proven_finals(records, subs, driving_dev=args.driving_dev)
     except (PermissionError, ValueError) as exc:
         raise SystemExit(str(exc))

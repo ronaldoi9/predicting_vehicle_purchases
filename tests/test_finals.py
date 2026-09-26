@@ -406,3 +406,31 @@ def test_an_unattended_session_may_never_select_the_proven_finals() -> None:
         assert "driving dev" in str(exc).lower()
         return
     raise AssertionError("the two finals are always the driving dev's")
+
+
+# --------------------------------------------------------------------------- #
+# Turn 3's freeze is a date (ADR-0006): no Run Record after 29/09 23:59 BRT.
+# --------------------------------------------------------------------------- #
+def test_the_turn_3_freeze_is_29_09_at_23_59_brt() -> None:
+    assert finals.TURN3_FREEZE.isoformat() == "2026-09-30T03:00:00+00:00"
+
+
+def test_runs_recorded_before_the_freeze_pass_whatever_their_name() -> None:
+    records = [
+        _run("r1", "hpsearch_lightgbm_0007", 0.9445, timestamp="2026-09-25T13:48:14+00:00"),
+        _run("r2", "blend_turn3", 0.9462, timestamp="2026-09-30T02:59:59+00:00"),
+    ]
+    finals.assert_nothing_after_freeze(records)  # must not raise
+
+
+def test_a_run_recorded_after_the_freeze_fails_loudly() -> None:
+    records = [
+        _run("r1", "te_keys_prior5", 0.9460, timestamp="2026-09-25T23:00:15+00:00"),
+        _run("r9", "late_idea", 0.9470, timestamp="2026-09-30T03:00:00+00:00"),
+    ]
+    try:
+        finals.assert_nothing_after_freeze(records)
+    except ValueError as exc:
+        assert "r9" in str(exc) and "r1" not in str(exc)
+        return
+    raise AssertionError("a Run Record after the freeze must fail loudly")

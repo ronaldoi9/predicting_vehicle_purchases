@@ -77,7 +77,7 @@ The submission protected regardless of how the remaining experiments go — the 
 _Avoid_: fallback, safe submission, baseline submission
 
 **Proven Final**:
-A final submission whose every code path has already produced a scored submission in an earlier turn. Defined by the provenance of its code, never by its score — it guards against a bug the current turn introduced, which CV cannot see.
+A final submission whose family and Frame configuration have already produced a scored submission in the submissions ledger. Defined by the provenance of its code, never by its score — it guards against a bug that CV cannot see, which a scored submission would have exposed as a broken CV→LB Offset.
 _Avoid_: safe final, fallback final (both collide with the Floor)
 
 **Recipe**:
