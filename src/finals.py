@@ -9,7 +9,9 @@ measurement — and every one of them is pure and lives here:
   introduced after the freeze begins fails loudly rather than quietly entering
   the selection.
 
-* **The two final submissions = best CV + the Floor** (:func:`select_finals`).
+* **Turn 1's two finals = best CV + the Floor** (:func:`select_finals`), kept
+  as the record of that turn's rule; the CLI applies the Proven Final clause
+  below.
   *Not* best public LB: the 57,314-row public split cannot resolve 0.0002, so
   selecting on it selects the same noise named as the leading explanation for
   rank 1. *Not* the two best by CV: those are typically variants of one model and
@@ -18,7 +20,15 @@ measurement — and every one of them is pure and lives here:
   decision, reserved for the driving dev**, mirroring the manual promotion gate
   and the unattended-submission ban on finals in :mod:`submission`.
 
-* **Closing the turn** (:func:`render_turn_summary`): a summary rendered for the
+* **The Proven Final clause** (:func:`select_proven_finals`, #38, ADR-0006
+  §5): ADR-0005 replaced the Floor with the best single-family model, and turn
+  3 adds that at least one final must be **Proven** — its family and Frame
+  configuration already produced a scored submission. The first slot is best
+  CV; the second is the best Proven single-family model, so a bug turn-3 code
+  introduced cannot sink both. Only a candidate with a passing Confirmation Run
+  competes. This is the rule the ``select-finals`` CLI applies.
+
+* **Closing turn 1** (:func:`render_turn_summary`): a summary rendered for the
   wayfinder map's *Decisions-so-far*, embedding the Paired-Delta-sorted ledger
   table (:func:`render.render_table`) so turn 2 starts by reading results.
   **No separate turn document** — a third narrative artifact competes with the
@@ -29,21 +39,24 @@ The Confirmation Run of the standing Incumbent across fold seeds 0/1/2 — the
 other freeze move — lives in :mod:`runner` (``runner.confirm`` /
 ``runner.confirmation_summary``), beside the Comparison Run it re-runs.
 
-Everything here is dependency-free; :mod:`render` and :mod:`experiments` are the
-only imports, and both import by bare name in any environment.
+Everything here is dependency-free; every import is a bare-name module that
+imports in any environment.
 """
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+import json
+from dataclasses import MISSING, dataclass, fields
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import experiments
 import render
 import runner
 import submission
+import verdict
 
 
 def frozen_candidate_names() -> frozenset[str]:
@@ -186,6 +199,172 @@ def select_finals(
     )
 
 
+# --------------------------------------------------------------------------- #
+# The Proven Final clause (#38, ADR-0006 §5).
+# --------------------------------------------------------------------------- #
+# The second slot when no confirmed model is Proven: the hp-search LightGBM,
+# named by ADR-0006 §5 as the final a turn-3 best CV pairs with.
+DEFAULT_PROVEN_FINAL = "hpsearch_lightgbm_best_confirm"
+
+# Config fields that tune a code path rather than choose one: a run differing
+# from a submitted one only here is on the same family and Frame configuration.
+_TUNING_FIELDS = frozenset({"name", "fold_seed", "params", "num_boost_round"})
+
+
+def _config(record: Mapping[str, Any]) -> Mapping[str, Any]:
+    return record.get("config") or {}
+
+
+def passes_confirmation(records: Sequence[Mapping[str, Any]], experiment: str) -> bool:
+    """True iff ``experiment`` has a passing Confirmation Run in the ledger.
+
+    Reads its latest Run Record on each of fold seeds 0/1/2: each must keep a
+    positive Paired Delta or, for an Arena family's Member, pass its declared
+    Member gate — the same reading ``runner.confirm`` prints.
+    """
+    latest: dict[int, Mapping[str, Any]] = {}
+    for r in records:
+        if r.get("experiment") == experiment:
+            latest[int(_config(r).get("fold_seed", 0))] = r
+    for seed in verdict.CONFIRMATION_SEEDS:
+        r = latest.get(seed)
+        if r is None:
+            return False
+        gate = r.get("kill_criterion") or {}
+        if gate.get("member_gate"):
+            if not gate.get("passed"):
+                return False
+        elif r.get("paired_delta") is None or float(r["paired_delta"]) <= 0:
+            return False
+    return True
+
+
+def _code_path(record: Mapping[str, Any]) -> str:
+    """The family and Frame configuration a Run Record ran on, as a stable key.
+
+    Fields absent from an older record take the declaration's default, so a
+    record written before a field existed still matches one written after.
+    """
+    config = {
+        f.name: f.default
+        for f in fields(experiments.Experiment)
+        if f.default is not MISSING and f.name not in _TUNING_FIELDS
+    }
+    config.update((k, v) for k, v in _config(record).items() if k not in _TUNING_FIELDS)
+    return json.dumps(config, sort_keys=True, default=list)
+
+
+def proven_code_paths(
+    records: Sequence[Mapping[str, Any]],
+    submissions: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """The code paths that have already produced a scored submission."""
+    scored = {s.get("run_id") for s in submissions if s.get("public_score") is not None}
+    return frozenset(_code_path(r) for r in records if r.get("run_id") in scored)
+
+
+@dataclass(frozen=True)
+class Final:
+    """One final: the experiment, the Run Record it is read at, and its standing."""
+
+    experiment: str
+    run_id: str
+    oof_auc: float
+    proven: bool
+
+
+@dataclass(frozen=True)
+class ProvenFinalSelection:
+    """The two finals under the Proven Final clause, and what was refused."""
+
+    best_cv: Final
+    single_family: Final
+    refused: tuple[str, ...]
+    rationale: str
+
+
+_PROVEN_RATIONALE = (
+    "The two finals are best CV + the best single-family model by CV (ADR-0005), "
+    "and at least one of them is a Proven Final (ADR-0006 §5): its family and "
+    "Frame configuration have already produced a scored submission, so a bug the "
+    "current turn introduced — which CV cannot see — cannot sink both. Only a "
+    "candidate with a passing Confirmation Run competes."
+)
+
+
+def select_proven_finals(
+    records: Sequence[Mapping[str, Any]],
+    submissions: Sequence[Mapping[str, Any]],
+    *,
+    driving_dev: bool,
+) -> ProvenFinalSelection:
+    """Select the two finals: best CV + the best Proven single-family model.
+
+    Each experiment is read at its canonical-seed Run Record. Only one with a
+    passing Confirmation Run (:func:`passes_confirmation`) competes; an
+    unconfirmed one that would have ranked above the best-CV pick is named in
+    ``refused``. The first slot is the best CV, a Blend included. The second is
+    the best-CV single-family model among the rest that is Proven, so at least
+    one final always is. When none is, the second slot is
+    :data:`DEFAULT_PROVEN_FINAL`; and when that is not confirmed either but the
+    best CV is itself Proven, the clause already holds and the second slot is
+    the best-CV single-family model among the rest.
+    ``driving_dev`` must be ``True``, as in :func:`select_finals`.
+    """
+    if not driving_dev:
+        raise PermissionError(
+            "the two finals are always the driving dev's, never an unattended "
+            "session's — final selection is a risk decision, not a measurement"
+        )
+    canonical: dict[str, dict[str, Any]] = {}
+    for r in records:
+        if r.get("oof_auc") is not None and _config(r).get("fold_seed", 0) == 0:
+            canonical[str(r.get("experiment"))] = dict(r)
+    ranked = sorted(canonical.values(), key=lambda r: -float(r["oof_auc"]))
+    confirmed = [r for r in ranked if passes_confirmation(records, r["experiment"])]
+    if not confirmed:
+        raise ValueError("no run in the ledger has a passing Confirmation Run to select")
+    best, rest = confirmed[0], confirmed[1:]
+    confirmed_names = {r["experiment"] for r in confirmed}
+    refused = tuple(
+        r["experiment"]
+        for r in ranked
+        if float(r["oof_auc"]) > float(best["oof_auc"])
+        and r["experiment"] not in confirmed_names
+    )
+
+    proven = proven_code_paths(records, submissions)
+    single_families = [r for r in rest if _config(r).get("model")]
+    single_family = next((r for r in single_families if _code_path(r) in proven), None)
+    if single_family is None:
+        default = next((r for r in rest if r["experiment"] == DEFAULT_PROVEN_FINAL), None)
+        if default is not None:
+            single_family = default
+        elif _code_path(best) in proven and single_families:
+            single_family = single_families[0]
+        else:
+            raise ValueError(
+                "no confirmed single-family model is a Proven Final, and "
+                f"{DEFAULT_PROVEN_FINAL!r} has no passing Confirmation Run to take "
+                "the second slot — at least one final must be Proven (ADR-0006 §5)"
+            )
+
+    def final(r: Mapping[str, Any]) -> Final:
+        return Final(
+            experiment=str(r["experiment"]),
+            run_id=str(r["run_id"]),
+            oof_auc=float(r["oof_auc"]),
+            proven=_code_path(r) in proven,
+        )
+
+    return ProvenFinalSelection(
+        best_cv=final(best),
+        single_family=final(single_family),
+        refused=refused,
+        rationale=_PROVEN_RATIONALE,
+    )
+
+
 def render_turn_summary(
     records: Sequence[Mapping[str, Any]],
     submissions: Sequence[Mapping[str, Any]],
@@ -220,15 +399,16 @@ def render_turn_summary(
 
 
 # --------------------------------------------------------------------------- #
-# CLI: select the finals (driving-dev only) and print the turn summary.
+# CLI: select the finals (driving-dev only) under the Proven Final clause.
 # --------------------------------------------------------------------------- #
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="select-finals",
         description=(
-            "Select the two final submissions (best CV + the Floor) and print the "
-            "turn's closing summary for the wayfinder map. The finals are a risk "
-            "decision reserved for the driving dev."
+            "Select the two final submissions: best CV + the best single-family "
+            "model, at least one of them a Proven Final, both with a passing "
+            "Confirmation Run. The finals are a risk decision reserved for the "
+            "driving dev."
         ),
     )
     parser.add_argument(
@@ -239,34 +419,48 @@ def build_parser() -> argparse.ArgumentParser:
             "because the two finals are never an unattended session's"
         ),
     )
+    parser.add_argument(
+        "--runs-ledger",
+        type=Path,
+        help="read Run Records from this file instead of the runs ledger (a replay)",
+    )
+    parser.add_argument(
+        "--submissions-ledger",
+        type=Path,
+        help="read submissions from this file instead of the submissions ledger",
+    )
     return parser
+
+
+def _describe(final: Final) -> str:
+    return (
+        f"{final.experiment} ({final.run_id}, OOF {final.oof_auc:.5f}, "
+        f"{'Proven' if final.proven else 'not Proven'})"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    records = runner.load_records()
-    subs = submission.load_submissions()
+    records = runner.load_records(args.runs_ledger)
+    subs = submission.load_submissions(args.submissions_ledger)
 
     # The freeze is asserted first: a new candidate in the ledger breaks band
     # (iii)'s premise before any final is chosen.
     assert_no_new_candidate(records)
 
     try:
-        selection = select_finals(records, subs, driving_dev=args.driving_dev)
-    except PermissionError as exc:
-        raise SystemExit(str(exc))
-    except ValueError as exc:
+        selection = select_proven_finals(records, subs, driving_dev=args.driving_dev)
+    except (PermissionError, ValueError) as exc:
         raise SystemExit(str(exc))
 
-    print("Selected the two final submissions (best CV + the Floor):")
-    print(
-        f"  best CV: {selection.best_cv_run_id} (OOF {selection.best_cv_oof_auc:.5f})"
-    )
-    print(f"  Floor:   {selection.floor_run_id} (turn 1 alone)")
+    print("Selected the two final submissions (best CV + best single-family, "
+          "at least one Proven):")
+    print("  best CV:       " + _describe(selection.best_cv))
+    print("  single-family: " + _describe(selection.single_family))
+    if selection.refused:
+        print("  refused, no passing Confirmation Run: " + ", ".join(selection.refused))
     print()
-    print("Turn summary to append to the wayfinder map's Decisions-so-far "
-          "(no separate document):")
-    print(render_turn_summary(records, subs, selection))
+    print(f"_{selection.rationale}_")
     return 0
 
 

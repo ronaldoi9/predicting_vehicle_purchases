@@ -243,3 +243,166 @@ def test_close_turn_prints_the_summary_and_writes_no_file(tmp_path=None) -> None
         print(text)
     out = buf.getvalue()
     assert "Decisions" in out or "final" in out.lower()
+
+
+# --------------------------------------------------------------------------- #
+# The Proven Final clause (#38, ADR-0006 §5): best CV + the best Proven
+# single-family model, both with a passing Confirmation Run.
+# --------------------------------------------------------------------------- #
+def _config(name, fold_seed, *, model="lightgbm", **frame):
+    config = {
+        "name": name,
+        "frame": "baseline",
+        "model": model,
+        "num_boost_round": 700,
+        "fold_seed": fold_seed,
+        "target_encode": ["Annual_Income_USD"],
+        "params": {"learning_rate": 0.05},
+    }
+    config.update(frame)
+    return config
+
+
+def _confirmed(experiment, oof_auc, *, deltas=(0.0002, 0.0002, 0.0002), **config):
+    """A Comparison Run on each of fold seeds 0/1/2, one Paired Delta per seed."""
+    return [
+        _run(
+            f"{experiment}-s{seed}",
+            experiment,
+            oof_auc + 0.00001 * seed,
+            paired_delta=delta,
+            config=_config(experiment, seed, **config),
+        )
+        for seed, delta in zip((0, 1, 2), deltas)
+    ]
+
+
+def _scored(run_id):
+    return {"run_id": run_id, "public_score": 0.9456, "is_floor": False, "is_final": False}
+
+
+def test_a_proven_best_cv_pick_stays_best_cv_beside_the_best_proven_single_family() -> None:
+    # tuned is Proven through its own scored submission; old_te shares its
+    # family and Frame configuration with it, only the params differ, so it is
+    # Proven too. The unproven xgboost ranks between them and takes no slot.
+    records = [
+        *_confirmed("old_te", 0.94528),
+        *_confirmed("tuned", 0.94557, params={"learning_rate": 0.015}),
+        *_confirmed("xgb", 0.94549, model="xgboost"),
+    ]
+    subs = [_scored("old_te-s0"), _scored("tuned-s0")]
+    sel = finals.select_proven_finals(records, subs, driving_dev=True)
+    assert (sel.best_cv.experiment, sel.best_cv.run_id) == ("tuned", "tuned-s0")
+    assert sel.best_cv.oof_auc == 0.94557
+    assert sel.best_cv.proven
+    assert (sel.single_family.experiment, sel.single_family.run_id) == ("old_te", "old_te-s0")
+    assert sel.single_family.proven
+
+
+def test_a_non_proven_best_cv_pick_forces_a_proven_second_final() -> None:
+    # The best CV is new code (a family never submitted), and so is the next
+    # best by CV: the second slot skips both to the best Proven model.
+    records = [
+        *_confirmed("incumbent", 0.94557),
+        *_confirmed("new_family", 0.94616, model="heuljax", frame="raw_columns"),
+        *_confirmed("new_te", 0.94597, te_derived_keys=[["Annual_Income_USD", "div100"]]),
+    ]
+    subs = [_scored("incumbent-s0")]
+    sel = finals.select_proven_finals(records, subs, driving_dev=True)
+    assert sel.best_cv.experiment == "new_family"
+    assert not sel.best_cv.proven
+    assert sel.single_family.experiment == "incumbent"
+    assert sel.single_family.proven
+
+
+def test_a_submission_without_a_public_score_proves_nothing() -> None:
+    records = [
+        *_confirmed("incumbent", 0.94557),
+        *_confirmed("new_family", 0.94616, model="heuljax"),
+    ]
+    unscored = {"run_id": "incumbent-s0", "public_score": None}
+    try:
+        finals.select_proven_finals(records, [unscored], driving_dev=True)
+    except ValueError as exc:
+        assert "proven" in str(exc).lower()
+        return
+    raise AssertionError("an unscored submission must not make a Proven Final")
+
+
+def test_no_confirmed_proven_model_puts_the_hp_search_lightgbm_second() -> None:
+    default = finals.DEFAULT_PROVEN_FINAL
+    assert default == "hpsearch_lightgbm_best_confirm"
+    records = [
+        *_confirmed("new_family", 0.94616, model="heuljax"),
+        *_confirmed(default, 0.94557),
+    ]
+    sel = finals.select_proven_finals(records, [], driving_dev=True)
+    assert sel.best_cv.experiment == "new_family"
+    assert sel.single_family.experiment == default
+
+
+def test_a_proven_best_cv_needs_no_proven_second_final() -> None:
+    # The clause already holds on the first slot, so the second is the next
+    # best single-family model even though it is not Proven.
+    records = [
+        *_confirmed("incumbent", 0.94557),
+        *_confirmed("xgb", 0.94549, model="xgboost"),
+    ]
+    sel = finals.select_proven_finals(records, [_scored("incumbent-s0")], driving_dev=True)
+    assert (sel.best_cv.experiment, sel.best_cv.proven) == ("incumbent", True)
+    assert (sel.single_family.experiment, sel.single_family.proven) == ("xgb", False)
+
+
+def test_a_candidate_without_a_passing_confirmation_run_is_refused() -> None:
+    records = [
+        *_confirmed("incumbent", 0.94557),
+        *_confirmed("proven_too", 0.94528),
+        # Best by CV, but only ever run on the canonical seed.
+        _run("blend-s0", "blend", 0.94622, paired_delta=0.00006,
+             config={"name": "blend", "fold_seed": 0, "members": []}),
+        # Second best by CV, but its Paired Delta flips sign on fold seed 2.
+        *_confirmed("flaky", 0.94600, deltas=(0.0002, 0.0001, -0.00005)),
+    ]
+    subs = [_scored("incumbent-s0")]
+    sel = finals.select_proven_finals(records, subs, driving_dev=True)
+    assert sel.best_cv.experiment == "incumbent"
+    assert sel.single_family.experiment == "proven_too"
+    assert sel.refused == ("blend", "flaky")
+
+
+def test_a_member_gate_held_on_every_seed_is_a_passing_confirmation_run() -> None:
+    # An Arena family's Confirmation Run reads its declared Member gate.
+    records = [*_confirmed("incumbent", 0.94557)]
+    for seed in (0, 1, 2):
+        records.append(_run(
+            f"member-s{seed}", "member", 0.94616, paired_delta=-0.0001,
+            kill_criterion={"member_gate": True, "passed": True},
+            config=_config("member", seed, model="heuljax"),
+        ))
+    sel = finals.select_proven_finals(records, [_scored("incumbent-s0")], driving_dev=True)
+    assert sel.best_cv.experiment == "member"
+    assert finals.passes_confirmation(records, "member")
+    records[-1]["kill_criterion"]["passed"] = False
+    assert not finals.passes_confirmation(records, "member")
+
+
+def test_a_blend_takes_the_best_cv_slot_but_never_the_single_family_one() -> None:
+    blend = [
+        _run(f"blend-s{seed}", "blend", 0.94622, paired_delta=0.0003,
+             config={"name": "blend", "fold_seed": seed, "members": []})
+        for seed in (0, 1, 2)
+    ]
+    records = [*_confirmed("incumbent", 0.94557), *blend]
+    sel = finals.select_proven_finals(records, [_scored("incumbent-s0")], driving_dev=True)
+    assert sel.best_cv.experiment == "blend"
+    assert sel.single_family.experiment == "incumbent"
+
+
+def test_an_unattended_session_may_never_select_the_proven_finals() -> None:
+    records = [*_confirmed("incumbent", 0.94557), *_confirmed("other", 0.94528)]
+    try:
+        finals.select_proven_finals(records, [_scored("incumbent-s0")], driving_dev=False)
+    except PermissionError as exc:
+        assert "driving dev" in str(exc).lower()
+        return
+    raise AssertionError("the two finals are always the driving dev's")
